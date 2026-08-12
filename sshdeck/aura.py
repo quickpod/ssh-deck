@@ -91,11 +91,11 @@ TOKENS = {
     },
     "geometry": {
         "radius_card": 12, "radius_button": 10, "radius_input": 8,
-        "sidebar_w": 236, "header_h": 66, "pad": 24, "button_h": 36,
-        "row_h": 32,
+        "sidebar_w": 248, "header_h": 70, "pad": 24, "button_h": 38,
+        "row_h": 34,
     },
     "type": {
-        "title": 18, "heading": 14, "body": 11, "caption": 10, "section": 10,
+        "title": 19, "heading": 15, "body": 12, "caption": 11, "section": 11,
     },
 }
 
