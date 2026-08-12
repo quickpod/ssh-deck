@@ -3,6 +3,16 @@ r"""SSHDeck entry point (built into SSHDeck.exe). GUI with no args, CLI with arg
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Single-instance marker: the installer's AppMutex checks this to warn the
+# user to close the app before install/uninstall. Harmless off Windows.
+if os.name == "nt":
+    try:
+        import ctypes
+        ctypes.windll.kernel32.CreateMutexW(None, False, "QuickOpen.SSHDeck")
+    except Exception:
+        pass
+
+
 
 def main():
     argv = sys.argv[1:]

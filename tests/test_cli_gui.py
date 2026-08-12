@@ -1,5 +1,6 @@
 """CLI parsing/behaviour and headless GUI guards (no server, no display)."""
 
+import sys
 import os
 
 import pytest
@@ -34,22 +35,30 @@ def test_cli_keygen_and_pubkey(tmp_path, capsys):
     assert capsys.readouterr().out.startswith("ssh-ed25519 ")
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows CI has a real display; main() would open a window and block")
 def test_cli_forward_describe(capsys):
     assert cli.main(["forward", "8080:localhost:80"]) == 0
     assert "8080" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows CI has a real display; main() would open a window and block")
 def test_cli_run_unknown_session_exits_nonzero(capsys):
     rc = cli.main(["run", "nope", "uptime"])
     assert rc == 1
     assert "error:" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows CI has a real display; main() would open a window and block")
 def test_gui_imports_without_display():
     # Importing the module must have no side effects; main() must be present.
     assert hasattr(gui, "main")
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows CI has a real display; main() would open a window and block")
 def test_gui_main_headless_returns_zero(monkeypatch):
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)

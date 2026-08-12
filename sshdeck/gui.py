@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-r"""SSHDeck -- a pure-stdlib tkinter GUI on top of the ``sshdeck`` library.
+r"""SSHDeck -- an Aura (QuickOpen design system) GUI on top of the ``sshdeck`` library.
 
-A single main window: a left sidebar of sections (Sessions, Terminal, SFTP, Keys,
-Port Forwards) and a main panel that swaps to the selected section.  Every network
-operation calls the tested core library (never re-implements SSH logic) and runs
-on a background thread so the UI stays responsive; results are marshalled back
-with ``self.after`` and reported inline -- a clear status plus, on failure, the
-``SSHDeckError`` message (never a raw traceback).
+A single Aura window: a left sidebar of sections (Sessions, Terminal, SFTP, Keys,
+Port Forwards, About) and a main panel that swaps to the selected section.  Every
+network operation calls the tested core library (never re-implements SSH logic)
+and runs on a background thread so the UI stays responsive; results are marshalled
+back with ``self.after`` and reported inline in the Aura status bar -- a clear
+status plus, on failure, the ``SSHDeckError`` message (never a raw traceback).
 
-Design goals baked in here:
-  * pure standard-library tkinter/ttk -- NO third-party GUI deps.  Dark mode is a
-    ttk-style + palette swap mirroring the QuickOpen palette.
+Design goals baked in here (mirrors the QuickOpen house style):
+  * built on the vendored ``sshdeck/aura.py`` design system, which layers the
+    quickopen.ai look (deep space + light) over CustomTkinter.  Runtime deps:
+    ``customtkinter`` (+ ``darkdetect``) — declared in requirements.txt; the
+    PyInstaller build adds ``--collect-all customtkinter``.
   * Importing this module does nothing.  Only :func:`main` builds a root window,
-    and it degrades gracefully (prints a note, returns 0) with no display.
+    and it degrades gracefully (prints a note, returns 0) with no display or
+    with customtkinter missing.
   * Frozen-exe safe: bundled assets are resolved via ``sys._MEIPASS`` / the exe
     directory when ``sys.frozen`` is set -- never ``__file__``.
   * Secrets stay in memory: passwords/passphrases are prompted at connect time and
@@ -27,21 +30,25 @@ import os
 import sys
 import threading
 
-# NOTE: tkinter is imported lazily inside main()/build_app so that merely importing
-# this module (e.g. during packaging or on a headless CI box) never fails.
+# NOTE: tkinter/customtkinter are imported lazily inside main()/build_app so that
+# merely importing this module (e.g. during packaging or on a headless CI box)
+# never fails.
 
 APP_NAME = "SSHDeck"
 APP_VERSION = "1.0.0"
 WINDOW_TITLE = "SSHDeck — by QuickOpen (quickopen.ai)"
 PROJECT_URL = "https://quickopen.ai"
+ACCENT = "#2ecf80"      # UI-accent registry override (icon is near-black)
 
-# (section_id, label) -- section_id maps to a _panel_<id> method.
+# (section_id, label, glyph) -- section_id maps to a _build_<id> method.
+# Glyphs are DejaVu-safe (verified against the font cmap; see aura README §6).
 SECTIONS = [
-    ("sessions", "Sessions"),
-    ("terminal", "Terminal"),
-    ("sftp", "SFTP"),
-    ("keys", "Keys"),
-    ("forwards", "Port Forwards"),
+    ("sessions", "Sessions", "⛁"),
+    ("terminal", "Terminal", "▸"),
+    ("sftp", "SFTP", "⇅"),
+    ("keys", "Keys", "⚲"),
+    ("forwards", "Port Forwards", "⇄"),
+    ("about", "About", "◈"),
 ]
 
 SECTION_DESCRIPTIONS = {
@@ -54,24 +61,6 @@ SECTION_DESCRIPTIONS = {
             "server's authorized_keys.",
     "forwards": "Local and remote port forwards (SSH tunnels) over the current "
                 "connection.",
-}
-
-# ---- colour palettes (mirror the QuickOpen palette) -------------------------
-PALETTES = {
-    "light": {
-        "bg": "#f5f7fa", "surface": "#ffffff", "text": "#141820",
-        "muted": "#5b6472", "primary": "#2f5fe0", "primary_hi": "#2450c8",
-        "entry": "#ffffff", "border": "#d5dae2", "sel": "#2f5fe0",
-        "sel_fg": "#ffffff", "trough": "#e2e7ef", "ok": "#1f7a3d",
-        "err": "#c0392b", "term_bg": "#0b0e14", "term_fg": "#d7dde8",
-    },
-    "dark": {
-        "bg": "#0f1115", "surface": "#1a1e24", "text": "#f1f3f7",
-        "muted": "#9aa4b2", "primary": "#5b86f7", "primary_hi": "#7098ff",
-        "entry": "#1a1e24", "border": "#2a2f38", "sel": "#5b86f7",
-        "sel_fg": "#0f1115", "trough": "#2a2f38", "ok": "#5bd68a",
-        "err": "#ff6b5e", "term_bg": "#05070b", "term_fg": "#d7dde8",
-    },
 }
 
 
@@ -128,17 +117,19 @@ def open_with_default_app(path):
 
 
 # ---------------------------------------------------------------------------
-# The app (built lazily; tkinter imported only inside build_app/main)
+# The app (built lazily; tkinter/customtkinter imported only inside build_app)
 # ---------------------------------------------------------------------------
 def build_app():
-    """Construct and return the App class bound to a live tkinter import.
+    """Construct and return the App class bound to live GUI imports.
 
-    Kept inside a function so this module imports cleanly without a display.
+    Kept inside a function so this module imports cleanly without a display
+    (and without customtkinter installed).
     """
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox, simpledialog
+    import customtkinter as ctk
 
-    from . import guiconfig
+    from . import aura, guiconfig
     from . import client as sshclient
     from . import forward as forwardmod
     from . import keys as keysmod
@@ -146,43 +137,50 @@ def build_app():
     from . import sftp as sftpmod
     from .errors import SSHDeckError
 
-    FONT = "Segoe UI"
     MONO = ("Consolas", 10) if sys.platform == "win32" else ("Monospace", 10)
 
     # -- the main window --------------------------------------------------
-    class App(tk.Tk):
+    class App(aura.AuraApp):
         def __init__(self):
-            super().__init__()
-            self.title(WINDOW_TITLE)
-            self.geometry("1120x720")
-            self.minsize(920, 600)
+            super().__init__(
+                title=WINDOW_TITLE, app_name=APP_NAME, accent=ACCENT,
+                theme=guiconfig.get_theme(),
+                icon_png=asset_path("ssh-deck.png"), version=APP_VERSION,
+                tagline="offline SSH/SFTP",
+                on_theme_change=guiconfig.set_theme,
+                size=(1120, 720), min_size=(920, 600))
 
-            self.theme = guiconfig.get_theme()
             self._busy = False
-            self._panels = {}
-            self._current = None
-            self._tracked = []          # (tk_widget, role) for manual re-theming
-            self._img_refs = []
+            self._img_refs_gui = []      # AuraApp owns self._img_refs — keep ours apart
 
             # connection state
-            self._client = None         # live paramiko client, or None
-            self._session = None        # the connected Session
-            self._chan = None           # interactive shell channel
-            self._chan_stop = None      # threading.Event for the read loop
-            self._forwards = []         # [(spec, stopper)]
+            self._client = None          # live paramiko client, or None
+            self._session = None         # the connected Session
+            self._chan = None            # interactive shell channel
+            self._chan_stop = None       # threading.Event for the read loop
+            self._forwards = []          # [(spec, stopper)]
 
             self._set_icon()
             self._build_menu()
-            self._build_layout()
-            self._apply_theme()
-            self.protocol("WM_DELETE_WINDOW", self._on_close)
-            self.after(50, self._select_first)
 
-        # ---- assets / icon
+            # header-right live connection indicator
+            self._conn_lbl = ctk.CTkLabel(
+                self.header_actions, text="not connected",
+                font=aura.font(role="caption"))
+            self._conn_lbl.pack(side="right")
+
+            for sid, label, glyph in SECTIONS:
+                self.add_section(sid, label, glyph,
+                                 getattr(self, "_build_" + sid))
+            self.show("sessions")
+            self.set_status("Ready")
+            self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # ---- assets / icon (window/taskbar icon; sidebar icon is AuraApp's)
         def _set_icon(self):
             try:
                 ico = asset_path("ssh-deck.ico")
-                if ico:
+                if ico and os.name == "nt":
                     self.iconbitmap(ico)
                     return
             except Exception:
@@ -191,120 +189,12 @@ def build_app():
                 png = asset_path("ssh-deck.png")
                 if png:
                     img = tk.PhotoImage(file=png)
-                    self._img_refs.append(img)
+                    self._img_refs_gui.append(img)
                     self.iconphoto(True, img)
             except Exception:
                 pass  # icon is cosmetic; never block launch
 
-        # ---- theming
-        def track(self, widget, role):
-            self._tracked.append((widget, role))
-
-        def _pal(self):
-            return PALETTES[self.theme]
-
-        def _apply_theme(self):
-            p = self._pal()
-            style = ttk.Style(self)
-            try:
-                style.theme_use("clam")
-            except Exception:
-                pass
-            self.configure(bg=p["bg"])
-            style.configure(".", background=p["bg"], foreground=p["text"],
-                            fieldbackground=p["entry"], bordercolor=p["border"],
-                            font=(FONT, 10))
-            style.configure("TFrame", background=p["bg"])
-            style.configure("Sidebar.TFrame", background=p["surface"])
-            style.configure("Card.TFrame", background=p["surface"])
-            style.configure("TLabel", background=p["bg"], foreground=p["text"])
-            style.configure("Muted.TLabel", background=p["bg"], foreground=p["muted"])
-            style.configure("Header.TLabel", background=p["bg"], foreground=p["text"],
-                            font=(FONT, 15, "bold"))
-            style.configure("Sub.TLabel", background=p["bg"], foreground=p["muted"],
-                            font=(FONT, 10))
-            style.configure("Brand.TLabel", background=p["surface"],
-                            foreground=p["text"], font=(FONT, 12, "bold"))
-            style.configure("Ok.TLabel", background=p["bg"], foreground=p["ok"])
-            style.configure("Err.TLabel", background=p["bg"], foreground=p["err"])
-            style.configure("Status.TLabel", background=p["surface"],
-                            foreground=p["muted"])
-            style.configure("TButton", background=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], focuscolor=p["surface"],
-                            padding=(10, 5))
-            style.map("TButton",
-                      background=[("active", p["trough"]), ("disabled", p["bg"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Accent.TButton", background=p["primary"],
-                            foreground="#ffffff", padding=(12, 6))
-            style.map("Accent.TButton",
-                      background=[("active", p["primary_hi"]),
-                                  ("disabled", p["border"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Toggle.TButton", background=p["surface"],
-                            foreground=p["text"], padding=(8, 4))
-            for name in ("TEntry", "TSpinbox"):
-                style.configure(name, fieldbackground=p["entry"], foreground=p["text"],
-                                insertcolor=p["text"], bordercolor=p["border"])
-            style.configure("TCombobox", fieldbackground=p["entry"],
-                            foreground=p["text"], background=p["surface"],
-                            arrowcolor=p["text"])
-            style.map("TCombobox", fieldbackground=[("readonly", p["entry"])],
-                      foreground=[("readonly", p["text"])])
-            style.configure("TCheckbutton", background=p["bg"], foreground=p["text"])
-            style.map("TCheckbutton", background=[("active", p["bg"])])
-            style.configure("TRadiobutton", background=p["bg"], foreground=p["text"])
-            style.map("TRadiobutton", background=[("active", p["bg"])])
-            style.configure("TLabelframe", background=p["bg"], foreground=p["text"],
-                            bordercolor=p["border"])
-            style.configure("TLabelframe.Label", background=p["bg"],
-                            foreground=p["muted"])
-            style.configure("Treeview", background=p["surface"],
-                            fieldbackground=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], rowheight=24)
-            style.map("Treeview", background=[("selected", p["primary"])],
-                      foreground=[("selected", p["sel_fg"])])
-            style.configure("Sidebar.Treeview", background=p["surface"],
-                            fieldbackground=p["surface"])
-            style.configure("TScrollbar", background=p["surface"],
-                            troughcolor=p["bg"], bordercolor=p["border"],
-                            arrowcolor=p["text"])
-            style.configure("TSeparator", background=p["border"])
-
-            for widget, role in list(self._tracked):
-                try:
-                    if role == "listbox":
-                        widget.configure(bg=p["surface"], fg=p["text"],
-                                         selectbackground=p["primary"],
-                                         selectforeground=p["sel_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"],
-                                         borderwidth=0)
-                    elif role == "text":
-                        widget.configure(bg=p["surface"], fg=p["text"],
-                                         insertbackground=p["text"],
-                                         selectbackground=p["primary"],
-                                         selectforeground=p["sel_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"],
-                                         borderwidth=0)
-                    elif role == "term":
-                        widget.configure(bg=p["term_bg"], fg=p["term_fg"],
-                                         insertbackground=p["term_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"],
-                                         borderwidth=0)
-                except Exception:
-                    pass
-
-        def toggle_theme(self):
-            self.theme = "dark" if self.theme == "light" else "light"
-            guiconfig.set_theme(self.theme)
-            self._apply_theme()
-            self._theme_btn.configure(
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-
-        # ---- menu
+        # ---- menu (native menus stay; theme lives in the sidebar toggle too)
         def _build_menu(self):
             bar = tk.Menu(self)
             filem = tk.Menu(bar, tearoff=0)
@@ -318,11 +208,14 @@ def build_app():
             bar.add_cascade(label="File", menu=filem)
 
             viewm = tk.Menu(bar, tearoff=0)
-            viewm.add_command(label="Toggle dark mode", command=self.toggle_theme)
+            viewm.add_command(
+                label="Toggle dark mode",
+                command=lambda: self.set_theme(
+                    "light" if self.theme == "dark" else "dark"))
             bar.add_cascade(label="View", menu=viewm)
 
             helpm = tk.Menu(bar, tearoff=0)
-            helpm.add_command(label="About", command=self._about)
+            helpm.add_command(label="About", command=lambda: self.show("about"))
             helpm.add_command(label="Open project page (quickopen.ai)",
                               command=lambda: open_with_default_app(PROJECT_URL))
             bar.add_cascade(label="Help", menu=helpm)
@@ -344,106 +237,8 @@ def build_app():
             except SSHDeckError as exc:
                 self._show_error(str(exc))
                 return
-            self._select("sessions")
+            self.show("sessions")
             self.connect(session)
-
-        # ---- layout
-        def _build_layout(self):
-            top = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 8))
-            top.pack(fill="x", side="top")
-            ttk.Label(top, text="SSHDeck", style="Brand.TLabel").pack(side="left")
-            ttk.Label(top, style="Status.TLabel",
-                      text="  offline · open source · by QuickOpen").pack(side="left")
-            self._theme_btn = ttk.Button(
-                top, style="Toggle.TButton", command=self.toggle_theme,
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-            self._theme_btn.pack(side="right")
-            self._conn_lbl = ttk.Label(top, style="Status.TLabel",
-                                       text="not connected")
-            self._conn_lbl.pack(side="right", padx=12)
-
-            body = ttk.Frame(self, style="TFrame")
-            body.pack(fill="both", expand=True)
-
-            side = ttk.Frame(body, style="Sidebar.TFrame", width=190)
-            side.pack(side="left", fill="y")
-            side.pack_propagate(False)
-            self.nav = ttk.Treeview(side, show="tree", selectmode="browse",
-                                    style="Sidebar.Treeview")
-            self.nav.pack(fill="both", expand=True, padx=6, pady=6)
-            self._nav_ids = {}
-            for sid, label in SECTIONS:
-                iid = self.nav.insert("", "end", text="  " + label)
-                self._nav_ids[iid] = sid
-            self.nav.bind("<<TreeviewSelect>>", self._on_nav_select)
-
-            main = ttk.Frame(body, style="TFrame", padding=(16, 12))
-            main.pack(side="left", fill="both", expand=True)
-
-            head = ttk.Frame(main, style="TFrame")
-            head.pack(fill="x")
-            self.title_lbl = ttk.Label(head, text="Sessions", style="Header.TLabel")
-            self.title_lbl.pack(anchor="w")
-            self.desc_lbl = ttk.Label(head, text="", style="Sub.TLabel",
-                                      wraplength=760, justify="left")
-            self.desc_lbl.pack(anchor="w", pady=(2, 8))
-            ttk.Separator(main).pack(fill="x")
-
-            self.container = ttk.Frame(main, style="TFrame")
-            self.container.pack(fill="both", expand=True, pady=(10, 8))
-
-            bar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 6))
-            bar.pack(fill="x", side="bottom")
-            self.status_lbl = ttk.Label(bar, text="Ready", style="Status.TLabel",
-                                        width=16, anchor="w")
-            self.status_lbl.pack(side="left")
-            self.result_lbl = ttk.Label(bar, text="", style="Status.TLabel",
-                                        anchor="w", wraplength=820, justify="left")
-            self.result_lbl.pack(side="left", fill="x", expand=True, padx=8)
-
-        def _select_first(self):
-            for iid in self._nav_ids:
-                self.nav.selection_set(iid)
-                self.nav.see(iid)
-                break
-
-        def _select(self, section_id):
-            for iid, sid in self._nav_ids.items():
-                if sid == section_id:
-                    self.nav.selection_set(iid)
-                    return
-
-        def _on_nav_select(self, _e=None):
-            sel = self.nav.selection()
-            if not sel:
-                return
-            sid = self._nav_ids.get(sel[0])
-            if sid:
-                self._show_section(sid)
-
-        def _show_section(self, section_id):
-            if self._current is not None:
-                self._current.pack_forget()
-            panel = self._panels.get(section_id)
-            if panel is None:
-                panel = ttk.Frame(self.container, style="TFrame")
-                builder = getattr(self, "_panel_" + section_id, None)
-                if builder:
-                    builder(panel)
-                else:
-                    ttk.Label(panel, text="Not implemented.").pack()
-                self._panels[section_id] = panel
-                self._apply_theme()
-            panel.pack(fill="both", expand=True)
-            self._current = panel
-            label = dict(SECTIONS).get(section_id, section_id)
-            self.title_lbl.configure(text=label)
-            self.desc_lbl.configure(text=SECTION_DESCRIPTIONS.get(section_id, ""))
-            if hasattr(panel, "_on_show"):
-                try:
-                    panel._on_show()
-                except Exception:
-                    pass
 
         # ---- background operation runner
         def _bg(self, work, on_ok, button=None, busy="Working…"):
@@ -462,7 +257,6 @@ def build_app():
                 except Exception:
                     pass
             self._set_status(busy, kind="working")
-            self._clear_result(keep_status=True)
 
             def run():
                 try:
@@ -481,10 +275,8 @@ def build_app():
                     except Exception:
                         pass
                 if err is not None:
-                    self._set_status("error", kind="err")
                     self._show_error(err)
                     return
-                self._set_status("done", kind="ok")
                 try:
                     on_ok(res)
                 except Exception as ex:
@@ -492,34 +284,22 @@ def build_app():
 
             threading.Thread(target=run, daemon=True).start()
 
-        # ---- status/result helpers
+        # ---- status/result helpers (route to the Aura status bar)
         def _set_status(self, text, kind="idle"):
-            p = self._pal()
-            color = {"working": p["primary"], "ok": p["ok"], "err": p["err"]}.get(
-                kind, p["muted"])
-            self.status_lbl.configure(text=text, foreground=color)
-
-        def _clear_result(self, keep_status=False):
-            self.result_lbl.configure(text="")
-            if not keep_status:
-                self._set_status("Ready")
+            self.set_status(text, kind)
 
         def _show_error(self, message):
-            self.result_lbl.configure(text="✕ " + message,
-                                      foreground=self._pal()["err"])
+            self.set_error(message)
 
         def report_success(self, message):
-            self.result_lbl.configure(text="✓ " + message,
-                                      foreground=self._pal()["ok"])
-            self._set_status("done", kind="ok")
+            self.set_success(message)
 
         def _update_conn_label(self):
             if self._client is not None and self._session is not None:
-                self._conn_lbl.configure(text=f"connected: {self._session.target()}",
-                                         foreground=self._pal()["ok"])
+                self._conn_lbl.configure(
+                    text=f"● connected: {self._session.target()}")
             else:
-                self._conn_lbl.configure(text="not connected",
-                                         foreground=self._pal()["muted"])
+                self._conn_lbl.configure(text="not connected")
 
         # ================================================================
         # Connection management
@@ -591,86 +371,108 @@ def build_app():
         # ================================================================
         # PANELS
         # ================================================================
+        @staticmethod
+        def _intro(frame, sid):
+            text = SECTION_DESCRIPTIONS.get(sid)
+            if text:
+                aura.Caption(frame, text).pack(anchor="w", pady=(0, 12))
+
         # ---------- Sessions ----------
-        def _panel_sessions(self, parent):
-            left = ttk.Frame(parent, style="TFrame")
-            left.pack(side="left", fill="y", padx=(0, 12))
-            ttk.Label(left, text="Saved sessions", style="TLabel").pack(anchor="w")
-            box = ttk.Frame(left, style="TFrame")
-            box.pack(fill="both", expand=True, pady=4)
+        def _build_sessions(self, frame):
+            self._intro(frame, "sessions")
+            body = ctk.CTkFrame(frame, fg_color="transparent")
+            body.pack(fill="both", expand=True)
+
+            left = aura.Card(body, title="Saved sessions")
+            left.pack(side="left", fill="y", padx=(0, 14))
+            box = ctk.CTkFrame(left.body, fg_color="transparent")
+            box.pack(fill="both", expand=True)
             self._sess_list = tk.Listbox(box, height=16, width=26,
-                                         activestyle="none", exportselection=False)
+                                         activestyle="none", exportselection=False,
+                                         font=aura.font(role="body"))
             sb = ttk.Scrollbar(box, orient="vertical",
                                command=self._sess_list.yview)
             self._sess_list.configure(yscrollcommand=sb.set)
             sb.pack(side="right", fill="y")
             self._sess_list.pack(side="left", fill="both", expand=True)
-            self.track(self._sess_list, "listbox")
+            aura.track(self._sess_list, "listbox")
             self._sess_list.bind("<<ListboxSelect>>", lambda e: self._load_selected())
-            btns = ttk.Frame(left, style="TFrame")
-            btns.pack(fill="x", pady=(4, 0))
-            ttk.Button(btns, text="New", command=self._new_session,
-                       width=6).pack(side="left")
-            ttk.Button(btns, text="Delete", command=self._delete_session,
-                       width=7).pack(side="left", padx=4)
+            btns = ctk.CTkFrame(left.body, fg_color="transparent")
+            btns.pack(fill="x", pady=(10, 0))
+            aura.AuraButton(btns, "New", kind="secondary",
+                            command=self._new_session, width=64).pack(side="left")
+            aura.AuraButton(btns, "Delete", kind="danger",
+                            command=self._delete_session, width=72).pack(
+                side="left", padx=(8, 0))
 
-            right = ttk.Frame(parent, style="TFrame")
+            right = aura.Card(body, title="Connection details")
             right.pack(side="left", fill="both", expand=True)
+            form = right.body
 
             self._sf = {}   # form vars
-            def field(label, key, width=34):
-                row = ttk.Frame(right, style="TFrame")
-                row.pack(fill="x", pady=3)
-                ttk.Label(row, text=label, width=12, anchor="w").pack(side="left")
+
+            def field(label, key, width=None):
+                row = ctk.CTkFrame(form, fg_color="transparent")
+                row.pack(fill="x", pady=4)
+                ctk.CTkLabel(row, text=label, width=90, anchor="w",
+                             font=aura.font(role="body")).pack(side="left")
                 var = tk.StringVar()
                 self._sf[key] = var
-                ent = ttk.Entry(row, textvariable=var, width=width)
-                ent.pack(side="left", fill="x", expand=True)
+                kw = {"textvariable": var}
+                if width:
+                    kw["width"] = width
+                aura.AuraEntry(row, **kw).pack(side="left", fill="x", expand=True)
                 return row
 
             field("Name", "name")
             field("Host", "host")
-            prow = ttk.Frame(right, style="TFrame")
-            prow.pack(fill="x", pady=3)
-            ttk.Label(prow, text="Port", width=12, anchor="w").pack(side="left")
+
+            prow = ctk.CTkFrame(form, fg_color="transparent")
+            prow.pack(fill="x", pady=4)
+            ctk.CTkLabel(prow, text="Port", width=90, anchor="w",
+                         font=aura.font(role="body")).pack(side="left")
             self._sf["port"] = tk.StringVar(value="22")
-            ttk.Entry(prow, textvariable=self._sf["port"], width=8).pack(side="left")
-            ttk.Label(prow, text="User").pack(side="left", padx=(16, 4))
+            aura.AuraEntry(prow, textvariable=self._sf["port"], width=80).pack(
+                side="left")
+            ctk.CTkLabel(prow, text="User", font=aura.font(role="body")).pack(
+                side="left", padx=(16, 8))
             self._sf["user"] = tk.StringVar()
-            ttk.Entry(prow, textvariable=self._sf["user"]).pack(
+            aura.AuraEntry(prow, textvariable=self._sf["user"]).pack(
                 side="left", fill="x", expand=True)
 
-            arow = ttk.Frame(right, style="TFrame")
-            arow.pack(fill="x", pady=3)
-            ttk.Label(arow, text="Auth", width=12, anchor="w").pack(side="left")
+            arow = ctk.CTkFrame(form, fg_color="transparent")
+            arow.pack(fill="x", pady=4)
+            ctk.CTkLabel(arow, text="Auth", width=90, anchor="w",
+                         font=aura.font(role="body")).pack(side="left")
             self._sf["auth"] = tk.StringVar(value="key")
-            ttk.Combobox(arow, textvariable=self._sf["auth"], state="readonly",
-                         width=12, values=list(sessionsmod.AUTH_METHODS)).pack(
-                side="left")
+            aura.AuraCombo(arow, variable=self._sf["auth"], state="readonly",
+                           width=140,
+                           values=list(sessionsmod.AUTH_METHODS)).pack(side="left")
 
-            krow = ttk.Frame(right, style="TFrame")
-            krow.pack(fill="x", pady=3)
-            ttk.Label(krow, text="Key path", width=12, anchor="w").pack(side="left")
+            krow = ctk.CTkFrame(form, fg_color="transparent")
+            krow.pack(fill="x", pady=4)
+            ctk.CTkLabel(krow, text="Key path", width=90, anchor="w",
+                         font=aura.font(role="body")).pack(side="left")
             self._sf["key_path"] = tk.StringVar()
-            ttk.Entry(krow, textvariable=self._sf["key_path"]).pack(
-                side="left", fill="x", expand=True, padx=(0, 6))
-            ttk.Button(krow, text="Browse…", width=9,
-                       command=self._browse_key).pack(side="left")
+            aura.AuraEntry(krow, textvariable=self._sf["key_path"]).pack(
+                side="left", fill="x", expand=True, padx=(0, 8))
+            aura.AuraButton(krow, "Browse…", kind="secondary",
+                            command=self._browse_key, width=90).pack(side="left")
 
             field("Jump host", "jump")
-            ttk.Label(right, style="Muted.TLabel",
-                      text="Jump host is optional: user@bastion:22. Passwords and "
-                           "key passphrases are never saved — you'll be asked when "
-                           "connecting.").pack(anchor="w", pady=(2, 8))
+            aura.Caption(form,
+                         "Jump host is optional: user@bastion:22. Passwords and "
+                         "key passphrases are never saved — you'll be asked when "
+                         "connecting.").pack(anchor="w", pady=(2, 10))
 
-            actions = ttk.Frame(right, style="TFrame")
-            actions.pack(fill="x", pady=6)
-            ttk.Button(actions, text="Save session",
-                       command=self._save_session).pack(side="left")
-            ttk.Button(actions, text="Connect", style="Accent.TButton",
-                       command=self._connect_form).pack(side="left", padx=6)
-            ttk.Button(actions, text="Disconnect",
-                       command=self.disconnect).pack(side="left")
+            actions = ctk.CTkFrame(form, fg_color="transparent")
+            actions.pack(fill="x", pady=(4, 0))
+            aura.AuraButton(actions, "Save session", kind="secondary",
+                            command=self._save_session).pack(side="left")
+            aura.AuraButton(actions, "Connect", kind="primary",
+                            command=self._connect_form).pack(side="left", padx=8)
+            aura.AuraButton(actions, "Disconnect", kind="ghost",
+                            command=self.disconnect).pack(side="left")
 
             self._refresh_sessions()
 
@@ -706,7 +508,7 @@ def build_app():
             self._sf["jump"].set(s.jump or "")
 
         def _new_session(self):
-            self._select("sessions")
+            self.show("sessions")
             for key, var in getattr(self, "_sf", {}).items():
                 var.set("22" if key == "port" else ("key" if key == "auth" else ""))
 
@@ -757,28 +559,29 @@ def build_app():
             self.connect(session)
 
         # ---------- Terminal ----------
-        def _panel_terminal(self, parent):
-            top = ttk.Frame(parent, style="TFrame")
+        def _build_terminal(self, frame):
+            self._intro(frame, "terminal")
+            top = ctk.CTkFrame(frame, fg_color="transparent")
             top.pack(fill="x")
-            self._term_btn = ttk.Button(top, text="Open shell",
-                                        style="Accent.TButton",
-                                        command=self._open_shell)
+            self._term_btn = aura.AuraButton(top, "Open shell", kind="primary",
+                                             command=self._open_shell)
             self._term_btn.pack(side="left")
-            ttk.Button(top, text="Close shell",
-                       command=self._stop_shell).pack(side="left", padx=6)
-            ttk.Label(top, style="Muted.TLabel",
-                      text="  Interactive shell over the current connection.").pack(
-                side="left")
+            aura.AuraButton(top, "Close shell", kind="secondary",
+                            command=self._stop_shell).pack(side="left", padx=8)
+            aura.Caption(top,
+                         "Interactive shell over the current connection.").pack(
+                side="left", padx=(12, 0))
 
-            body = ttk.Frame(parent, style="TFrame")
-            body.pack(fill="both", expand=True, pady=(8, 0))
+            body = ctk.CTkFrame(frame, fg_color="transparent")
+            body.pack(fill="both", expand=True, pady=(12, 0))
             self._term = tk.Text(body, wrap="char", height=22, font=MONO,
-                                 state="disabled")
+                                 state="disabled", relief="flat",
+                                 padx=8, pady=6)
             sb = ttk.Scrollbar(body, orient="vertical", command=self._term.yview)
             self._term.configure(yscrollcommand=sb.set)
             sb.pack(side="right", fill="y")
             self._term.pack(side="left", fill="both", expand=True)
-            self.track(self._term, "term")
+            aura.track(self._term, "text")     # monospace output; theme-flips
             self._term.bind("<Key>", self._term_key)
 
         def _term_write(self, text):
@@ -855,67 +658,82 @@ def build_app():
             self._chan_stop = None
 
         # ---------- SFTP ----------
-        def _panel_sftp(self, parent):
-            top = ttk.Frame(parent, style="TFrame")
+        def _build_sftp(self, frame):
+            self._intro(frame, "sftp")
+            top = ctk.CTkFrame(frame, fg_color="transparent")
             top.pack(fill="x")
-            ttk.Button(top, text="Connect remote pane",
-                       command=self._sftp_open).pack(side="left")
-            ttk.Label(top, style="Muted.TLabel",
-                      text="  Local (left) ⇄ remote (right).").pack(side="left")
+            aura.AuraButton(top, "Connect remote pane", kind="secondary",
+                            command=self._sftp_open).pack(side="left")
+            aura.Caption(top, "Local (left) ⇄ remote (right).").pack(
+                side="left", padx=(12, 0))
 
-            panes = ttk.Frame(parent, style="TFrame")
-            panes.pack(fill="both", expand=True, pady=(8, 0))
+            panes = ctk.CTkFrame(frame, fg_color="transparent")
+            panes.pack(fill="both", expand=True, pady=(12, 0))
 
             # local pane
-            lp = ttk.Labelframe(panes, text="Local", padding=6)
-            lp.pack(side="left", fill="both", expand=True, padx=(0, 6))
+            lp = aura.Card(panes, title="Local")
+            lp.pack(side="left", fill="both", expand=True, padx=(0, 7))
             self._local_path = tk.StringVar(value=os.path.expanduser("~"))
-            lpr = ttk.Frame(lp, style="TFrame")
+            lpr = ctk.CTkFrame(lp.body, fg_color="transparent")
             lpr.pack(fill="x")
-            ttk.Entry(lpr, textvariable=self._local_path).pack(
-                side="left", fill="x", expand=True, padx=(0, 4))
-            ttk.Button(lpr, text="Go", width=4,
-                       command=self._local_refresh).pack(side="left")
-            self._local_list = tk.Listbox(lp, height=16, activestyle="none",
-                                          exportselection=False)
-            self._local_list.pack(fill="both", expand=True, pady=4)
-            self.track(self._local_list, "listbox")
+            aura.AuraEntry(lpr, textvariable=self._local_path).pack(
+                side="left", fill="x", expand=True, padx=(0, 6))
+            aura.AuraButton(lpr, "Go", kind="secondary", width=48,
+                            command=self._local_refresh).pack(side="left")
+            self._local_list = tk.Listbox(lp.body, height=16, activestyle="none",
+                                          exportselection=False,
+                                          font=aura.font(role="body"))
+            self._local_list.pack(fill="both", expand=True, pady=8)
+            aura.track(self._local_list, "listbox")
             self._local_list.bind("<Double-Button-1>",
                                   lambda e: self._local_enter())
-            lb = ttk.Frame(lp, style="TFrame")
-            lb.pack(fill="x")
-            ttk.Button(lb, text="Upload →", style="Accent.TButton",
-                       command=self._sftp_upload).pack(side="left")
+            aura.AuraButton(lp.body, "Upload →", kind="primary",
+                            command=self._sftp_upload).pack(anchor="w")
 
             # remote pane
-            rp = ttk.Labelframe(panes, text="Remote", padding=6)
-            rp.pack(side="left", fill="both", expand=True, padx=(6, 0))
+            rp = aura.Card(panes, title="Remote")
+            rp.pack(side="left", fill="both", expand=True, padx=(7, 0))
             self._remote_path = tk.StringVar(value=".")
-            rpr = ttk.Frame(rp, style="TFrame")
+            rpr = ctk.CTkFrame(rp.body, fg_color="transparent")
             rpr.pack(fill="x")
-            ttk.Entry(rpr, textvariable=self._remote_path).pack(
-                side="left", fill="x", expand=True, padx=(0, 4))
-            ttk.Button(rpr, text="Go", width=4,
-                       command=self._remote_refresh).pack(side="left")
-            self._remote_list = tk.Listbox(rp, height=16, activestyle="none",
-                                           exportselection=False)
-            self._remote_list.pack(fill="both", expand=True, pady=4)
-            self.track(self._remote_list, "listbox")
+            aura.AuraEntry(rpr, textvariable=self._remote_path).pack(
+                side="left", fill="x", expand=True, padx=(0, 6))
+            aura.AuraButton(rpr, "Go", kind="secondary", width=48,
+                            command=self._remote_refresh).pack(side="left")
+            self._remote_list = tk.Listbox(rp.body, height=16, activestyle="none",
+                                           exportselection=False,
+                                           font=aura.font(role="body"))
+            self._remote_list.pack(fill="both", expand=True, pady=8)
+            aura.track(self._remote_list, "listbox")
             self._remote_list.bind("<Double-Button-1>",
                                    lambda e: self._remote_enter())
-            rb = ttk.Frame(rp, style="TFrame")
+            rb = ctk.CTkFrame(rp.body, fg_color="transparent")
             rb.pack(fill="x")
-            ttk.Button(rb, text="← Download", style="Accent.TButton",
-                       command=self._sftp_download).pack(side="left")
-            ttk.Button(rb, text="Mkdir", command=self._sftp_mkdir).pack(
-                side="left", padx=4)
-            ttk.Button(rb, text="Delete", command=self._sftp_delete).pack(
-                side="left")
+            aura.AuraButton(rb, "← Download", kind="primary",
+                            command=self._sftp_download).pack(side="left")
+            aura.AuraButton(rb, "Mkdir", kind="secondary",
+                            command=self._sftp_mkdir).pack(side="left", padx=6)
+            aura.AuraButton(rb, "Delete", kind="danger",
+                            command=self._sftp_delete).pack(side="left")
+
+            # shared transfer progress (0..1 scale)
+            self._xfer_prog = aura.ProgressBar(frame)
+            self._xfer_prog.pack(fill="x", pady=(12, 2))
+            self._xfer_lbl = aura.Caption(frame, "")
+            self._xfer_lbl.pack(anchor="w")
 
             self._sftp = None
             self._local_entries = []
             self._remote_entries = []
             self._local_refresh()
+
+        def _xfer_progress(self, done, total):
+            """paramiko transfer callback(done, total) -> Aura bar (0..1)."""
+            def upd():
+                self._xfer_prog.set(min(1.0, done / max(1, total)))
+                self._xfer_lbl.configure(
+                    text=f"{human_size(done)} / {human_size(total)}")
+            self.after(0, upd)
 
         def _local_refresh(self):
             path = self._local_path.get() or os.path.expanduser("~")
@@ -928,10 +746,10 @@ def build_app():
                 return
             self._local_entries = [".."] + names
             self._local_list.delete(0, "end")
-            self._local_list.insert("end", "📁 ..")
+            self._local_list.insert("end", "▸ ..")
             for n in names:
                 is_dir = os.path.isdir(os.path.join(path, n))
-                self._local_list.insert("end", ("📁 " if is_dir else "   ") + n)
+                self._local_list.insert("end", ("▸ " if is_dir else "   ") + n)
 
         def _local_enter(self):
             sel = self._local_list.curselection()
@@ -972,10 +790,10 @@ def build_app():
             def ok(entries):
                 self._remote_entries = [".."] + entries
                 self._remote_list.delete(0, "end")
-                self._remote_list.insert("end", "📁 ..")
+                self._remote_list.insert("end", "▸ ..")
                 for e in entries:
                     self._remote_list.insert(
-                        "end", ("📁 " if e.is_dir else "   ") + e.name)
+                        "end", ("▸ " if e.is_dir else "   ") + e.name)
                 self.report_success(f"{len(entries)} item(s) in {path}")
             self._bg(work, ok, busy="Listing…")
 
@@ -1010,7 +828,9 @@ def build_app():
                 self._show_error("Select a local file to upload.")
                 return
             remote = self._remote_path.get().rstrip("/") + "/" + os.path.basename(local)
-            self._bg(lambda: self._sftp.put(local, remote),
+            self._xfer_prog.set(0)
+            self._bg(lambda: self._sftp.put(local, remote,
+                                            callback=self._xfer_progress),
                      lambda r: (self._remote_refresh(),
                                 self.report_success(f"Uploaded → {remote}")),
                      busy="Uploading…")
@@ -1025,7 +845,9 @@ def build_app():
                 return
             remote = self._remote_path.get().rstrip("/") + "/" + e.name
             local = os.path.join(self._local_path.get(), e.name)
-            self._bg(lambda: self._sftp.get(remote, local),
+            self._xfer_prog.set(0)
+            self._bg(lambda: self._sftp.get(remote, local,
+                                            callback=self._xfer_progress),
                      lambda r: (self._local_refresh(),
                                 self.report_success(f"Downloaded → {local}")),
                      busy="Downloading…")
@@ -1060,47 +882,55 @@ def build_app():
                      busy="Deleting…")
 
         # ---------- Keys ----------
-        def _panel_keys(self, parent):
-            gen = ttk.Labelframe(parent, text="Generate a key pair", padding=10)
+        def _build_keys(self, frame):
+            gen = aura.Card(frame, title="Generate a key pair")
             gen.pack(fill="x")
-            row = ttk.Frame(gen, style="TFrame")
-            row.pack(fill="x", pady=3)
-            ttk.Label(row, text="Type", width=12, anchor="w").pack(side="left")
+            g = gen.body
+            row = ctk.CTkFrame(g, fg_color="transparent")
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(row, text="Type", width=90, anchor="w",
+                         font=aura.font(role="body")).pack(side="left")
             self._k_type = tk.StringVar(value="ed25519")
-            ttk.Combobox(row, textvariable=self._k_type, state="readonly",
-                         width=12, values=list(keysmod.KEY_TYPES)).pack(side="left")
-            orow = ttk.Frame(gen, style="TFrame")
-            orow.pack(fill="x", pady=3)
-            ttk.Label(orow, text="Save to", width=12, anchor="w").pack(side="left")
+            aura.AuraCombo(row, variable=self._k_type, state="readonly",
+                           width=140, values=list(keysmod.KEY_TYPES)).pack(
+                side="left")
+            orow = ctk.CTkFrame(g, fg_color="transparent")
+            orow.pack(fill="x", pady=4)
+            ctk.CTkLabel(orow, text="Save to", width=90, anchor="w",
+                         font=aura.font(role="body")).pack(side="left")
             self._k_out = tk.StringVar(
                 value=os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519"))
-            ttk.Entry(orow, textvariable=self._k_out).pack(
-                side="left", fill="x", expand=True, padx=(0, 6))
-            ttk.Button(orow, text="Browse…", width=9,
-                       command=self._browse_out).pack(side="left")
-            prow = ttk.Frame(gen, style="TFrame")
-            prow.pack(fill="x", pady=3)
-            ttk.Label(prow, text="Passphrase", width=12, anchor="w").pack(side="left")
+            aura.AuraEntry(orow, textvariable=self._k_out).pack(
+                side="left", fill="x", expand=True, padx=(0, 8))
+            aura.AuraButton(orow, "Browse…", kind="secondary", width=90,
+                            command=self._browse_out).pack(side="left")
+            prow = ctk.CTkFrame(g, fg_color="transparent")
+            prow.pack(fill="x", pady=4)
+            ctk.CTkLabel(prow, text="Passphrase", width=90, anchor="w",
+                         font=aura.font(role="body")).pack(side="left")
             self._k_pass = tk.StringVar()
-            ttk.Entry(prow, textvariable=self._k_pass, show="*").pack(
+            aura.AuraEntry(prow, textvariable=self._k_pass, show="*").pack(
                 side="left", fill="x", expand=True)
-            ttk.Label(prow, text="Comment").pack(side="left", padx=(12, 4))
+            ctk.CTkLabel(prow, text="Comment", font=aura.font(role="body")).pack(
+                side="left", padx=(12, 8))
             self._k_comment = tk.StringVar()
-            ttk.Entry(prow, textvariable=self._k_comment, width=16).pack(side="left")
-            ttk.Button(gen, text="Generate", style="Accent.TButton",
-                       command=self._gen_key).pack(anchor="w", pady=(6, 0))
+            aura.AuraEntry(prow, textvariable=self._k_comment, width=150).pack(
+                side="left")
+            aura.AuraButton(g, "Generate", kind="primary",
+                            command=self._gen_key).pack(anchor="w", pady=(8, 0))
 
-            show = ttk.Labelframe(parent, text="Public key", padding=10)
-            show.pack(fill="both", expand=True, pady=(10, 0))
-            row2 = ttk.Frame(show, style="TFrame")
+            show = aura.Card(frame, title="Public key")
+            show.pack(fill="both", expand=True, pady=(14, 0))
+            row2 = ctk.CTkFrame(show.body, fg_color="transparent")
             row2.pack(fill="x")
-            ttk.Button(row2, text="Load a key…",
-                       command=self._load_pub).pack(side="left")
-            ttk.Button(row2, text="Copy to clipboard",
-                       command=self._copy_pub).pack(side="left", padx=6)
-            self._pub = tk.Text(show, height=5, wrap="char", font=MONO)
-            self._pub.pack(fill="both", expand=True, pady=(6, 0))
-            self.track(self._pub, "text")
+            aura.AuraButton(row2, "Load a key…", kind="secondary",
+                            command=self._load_pub).pack(side="left")
+            aura.AuraButton(row2, "Copy to clipboard", kind="secondary",
+                            command=self._copy_pub).pack(side="left", padx=6)
+            self._pub = tk.Text(show.body, height=5, wrap="char", font=MONO,
+                                relief="flat", padx=8, pady=6)
+            self._pub.pack(fill="both", expand=True, pady=(8, 0))
+            aura.track(self._pub, "text")
 
         def _browse_out(self):
             p = filedialog.asksaveasfilename(title="Save key as")
@@ -1166,37 +996,43 @@ def build_app():
             self.report_success("Public key copied to clipboard.")
 
         # ---------- Port Forwards ----------
-        def _panel_forwards(self, parent):
-            form = ttk.Labelframe(parent, text="Add a forward", padding=10)
+        def _build_forwards(self, frame):
+            self._intro(frame, "forwards")
+            form = aura.Card(frame, title="Add a forward")
             form.pack(fill="x")
-            row = ttk.Frame(form, style="TFrame")
-            row.pack(fill="x", pady=3)
-            ttk.Label(row, text="Kind", width=10, anchor="w").pack(side="left")
+            f = form.body
+            row = ctk.CTkFrame(f, fg_color="transparent")
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(row, text="Kind", width=70, anchor="w",
+                         font=aura.font(role="body")).pack(side="left")
             self._fw_kind = tk.StringVar(value="local")
-            ttk.Combobox(row, textvariable=self._fw_kind, state="readonly",
-                         width=10, values=list(forwardmod.KINDS)).pack(side="left")
-            ttk.Label(row, text="Spec").pack(side="left", padx=(16, 4))
+            aura.AuraCombo(row, variable=self._fw_kind, state="readonly",
+                           width=120, values=list(forwardmod.KINDS)).pack(
+                side="left")
+            ctk.CTkLabel(row, text="Spec", font=aura.font(role="body")).pack(
+                side="left", padx=(16, 8))
             self._fw_spec = tk.StringVar(value="8080:localhost:80")
-            ttk.Entry(row, textvariable=self._fw_spec).pack(
+            aura.AuraEntry(row, textvariable=self._fw_spec).pack(
                 side="left", fill="x", expand=True)
-            ttk.Label(form, style="Muted.TLabel",
-                      text="Spec: [bind_host:]bind_port:dest_host:dest_port  "
-                           "(e.g. 8080:localhost:80)").pack(anchor="w", pady=(2, 6))
-            fb = ttk.Frame(form, style="TFrame")
+            aura.Caption(f,
+                         "Spec: [bind_host:]bind_port:dest_host:dest_port  "
+                         "(e.g. 8080:localhost:80)").pack(anchor="w", pady=(4, 8))
+            fb = ctk.CTkFrame(f, fg_color="transparent")
             fb.pack(fill="x")
-            ttk.Button(fb, text="Describe",
-                       command=self._fw_describe).pack(side="left")
-            ttk.Button(fb, text="Start forward", style="Accent.TButton",
-                       command=self._fw_start).pack(side="left", padx=6)
+            aura.AuraButton(fb, "Describe", kind="secondary",
+                            command=self._fw_describe).pack(side="left")
+            aura.AuraButton(fb, "Start forward", kind="primary",
+                            command=self._fw_start).pack(side="left", padx=6)
 
-            active = ttk.Labelframe(parent, text="Active forwards", padding=10)
-            active.pack(fill="both", expand=True, pady=(10, 0))
-            self._fw_list = tk.Listbox(active, height=10, activestyle="none",
-                                       exportselection=False)
+            active = aura.Card(frame, title="Active forwards")
+            active.pack(fill="both", expand=True, pady=(14, 0))
+            self._fw_list = tk.Listbox(active.body, height=10, activestyle="none",
+                                       exportselection=False,
+                                       font=aura.font(role="body"))
             self._fw_list.pack(fill="both", expand=True)
-            self.track(self._fw_list, "listbox")
-            ttk.Button(active, text="Stop selected",
-                       command=self._fw_stop).pack(anchor="w", pady=(6, 0))
+            aura.track(self._fw_list, "listbox")
+            aura.AuraButton(active.body, "Stop selected", kind="secondary",
+                            command=self._fw_stop).pack(anchor="w", pady=(10, 0))
 
         def _fw_describe(self):
             try:
@@ -1239,34 +1075,29 @@ def build_app():
                 self._fw_list.delete(idx)
                 self.report_success("Forward stopped.")
 
-        # ---- About / shutdown
-        def _about(self):
-            win = tk.Toplevel(self)
-            win.title("About SSHDeck")
-            win.configure(bg=self._pal()["bg"])
-            win.resizable(False, False)
-            frm = ttk.Frame(win, style="TFrame", padding=18)
-            frm.pack(fill="both", expand=True)
-            ttk.Label(frm, text="SSHDeck", style="Header.TLabel").pack(anchor="w")
-            ttk.Label(frm, text=f"Version {APP_VERSION}",
-                      style="Sub.TLabel").pack(anchor="w", pady=(0, 8))
-            ttk.Label(frm, style="TLabel", justify="left", wraplength=380,
-                      text="A fast, fully-offline SSH & SFTP client — saved "
-                           "sessions, an interactive shell, a dual-pane file "
-                           "browser, key management and port forwards.\n\n"
-                           "100% AI-built, open source, published on QuickOpen.\n"
-                           "Credentials stay on your machine.").pack(anchor="w")
-            ttk.Label(frm, style="Sub.TLabel", justify="left", wraplength=380,
-                      text="Licensed under Apache-2.0. Built on paramiko."
-                      ).pack(anchor="w", pady=(8, 4))
-            link = ttk.Label(frm, text="Project page: quickopen.ai",
-                             style="Ok.TLabel", cursor="hand2")
-            link.pack(anchor="w", pady=(4, 10))
-            link.bind("<Button-1>", lambda e: open_with_default_app(PROJECT_URL))
-            ttk.Button(frm, text="Close", command=win.destroy).pack(anchor="e")
-            win.transient(self)
-            win.grab_set()
+        # ---------- About ----------
+        def _build_about(self, frame):
+            card = aura.Card(frame, title="About SSHDeck")
+            card.pack(fill="x")
+            aura.Heading(card.body, APP_NAME).pack(anchor="w")
+            aura.Caption(card.body, f"Version {APP_VERSION}").pack(
+                anchor="w", pady=(0, 10))
+            ctk.CTkLabel(
+                card.body, font=aura.font(), justify="left", anchor="w",
+                wraplength=560,
+                text="A fast, fully-offline SSH & SFTP client — saved sessions, "
+                     "an interactive shell, a dual-pane file browser, key "
+                     "management and port forwards.\n\n"
+                     "100% AI-built, open source, published on QuickOpen. "
+                     "Credentials stay on your machine.").pack(anchor="w")
+            aura.Caption(card.body,
+                         "Licensed under Apache-2.0. Built on paramiko (LGPL) "
+                         "and CustomTkinter (MIT).").pack(anchor="w", pady=(10, 4))
+            aura.AuraButton(card.body, "Project page: quickopen.ai", kind="ghost",
+                            command=lambda: open_with_default_app(
+                                PROJECT_URL)).pack(anchor="w", pady=(6, 0))
 
+        # ---- shutdown
         def _on_close(self):
             try:
                 self.disconnect()
@@ -1281,8 +1112,8 @@ def main():
     """Entry point: build the root window and run.  Degrades on headless hosts.
 
     Importing this module does nothing; only this function creates a Tk root.
-    With no display (e.g. a server), it prints a friendly note and returns 0
-    instead of raising.
+    With no display (e.g. a server) or without customtkinter installed, it
+    prints a friendly note and returns 0 instead of raising.
     """
     try:
         import tkinter as tk
@@ -1301,6 +1132,10 @@ def main():
     try:
         App = build_app()
         app = App()
+    except ImportError as exc:
+        print(f"{APP_NAME}: the GUI needs the 'customtkinter' package "
+              f"({exc}). Install it with:  pip install customtkinter")
+        return 0
     except tk.TclError as exc:
         print(f"{APP_NAME}: no graphical display available — cannot start the "
               f"GUI here ({exc}).")

@@ -20,9 +20,11 @@ jobs:
           pyinstaller --onefile --windowed --name SSHDeck
           --icon ssh-deck.ico
           --version-file packaging/version.txt
+          --hidden-import sshdeck.__main__
           --add-data "ssh-deck.ico;."
           --collect-all paramiko
           --collect-all cryptography
+          --collect-all customtkinter
           ssh_deck_app.py
       - name: Stage installer inputs
         shell: pwsh
@@ -42,4 +44,10 @@ jobs:
           path: |
             dist/SSHDeck.exe
             packaging/dist/SSHDeck-Setup.exe
+          if-no-files-found: error
+      - name: Upload staging (for signed repack)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-deck-staging
+          path: packaging/staging
           if-no-files-found: error
