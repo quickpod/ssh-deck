@@ -1,0 +1,45 @@
+name: build-windows
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: python -m pip install --upgrade pip -r requirements.txt pyinstaller pytest
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Build SSHDeck.exe
+        run: >
+          pyinstaller --onefile --windowed --name SSHDeck
+          --icon ssh-deck.ico
+          --version-file packaging/version.txt
+          --add-data "ssh-deck.ico;."
+          --collect-all paramiko
+          --collect-all cryptography
+          ssh_deck_app.py
+      - name: Stage installer inputs
+        shell: pwsh
+        run: |
+          $stage = "packaging/staging"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item dist/SSHDeck.exe $stage/
+          Copy-Item quickopen-root.crt, README.md, LICENSE $stage/ -ErrorAction SilentlyContinue
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Compile installer
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\installer.iss'
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-deck-windows
+          path: |
+            dist/SSHDeck.exe
+            packaging/dist/SSHDeck-Setup.exe
+          if-no-files-found: error

@@ -1,0 +1,2 @@
+# SSHDeck runtime deps — permissive/weak-copyleft only, no AGPL/proprietary.
+paramiko>=3.0

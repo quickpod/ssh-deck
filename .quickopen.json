@@ -1,0 +1,13 @@
+{
+  "slug": "ssh-deck",
+  "name": "SSHDeck",
+  "tagline": "An SSH/SFTP client \u2014 saved sessions, keys, file browser and port forwarding.",
+  "categorySlug": "remote-access",
+  "license": "Apache-2.0",
+  "description": "Connect to servers over SSH with saved session profiles and key management, run an interactive shell, transfer files with a dual-pane SFTP browser, and set up local/remote port forwards. A friendly PuTTY/Termius alternative that keeps all credentials on your machine.",
+  "aiStack": "Python (tkinter + CLI), paramiko",
+  "platforms": [
+    "windows"
+  ],
+  "buildEntry": "ssh_deck_app.py"
+}

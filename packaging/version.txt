@@ -1,0 +1,19 @@
+# PyInstaller version resource — QuickOpen publisher metadata.
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=(1,0,0,0), prodvers=(1,0,0,0), mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0,0)),
+  kids=[
+    StringFileInfo([
+      StringTable('040904B0',
+        [StringStruct('CompanyName', 'QuickOpen (quickopen.ai)'),
+         StringStruct('FileDescription', 'SSHDeck — offline QuickOpen tool'),
+         StringStruct('FileVersion', '1.0.0.0'),
+         StringStruct('InternalName', 'SSHDeck'),
+         StringStruct('LegalCopyright', 'Apache-2.0. 100% AI-built, published on QuickOpen.'),
+         StringStruct('OriginalFilename', 'SSHDeck.exe'),
+         StringStruct('ProductName', 'SSHDeck'),
+         StringStruct('ProductVersion', '1.0.0.0'),
+         StringStruct('Comments', 'https://quickopen.ai/projects/ssh-deck')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
