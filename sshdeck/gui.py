@@ -135,6 +135,7 @@ def build_app():
     from . import navigator
     from . import termview
     from . import identity
+    from . import masterkey
     from . import guiconfig
     from . import client as sshclient
     from . import forward as forwardmod
@@ -180,11 +181,109 @@ def build_app():
                                  getattr(self, "_build_" + sid))
             self.show("navigator")
             self._install_sidebar_toggle()
+            # Before anything reads the session store: either unlock it or
+            # offer to protect it.
+            self.after(120, self._master_password_gate)
             # Start collapsed: the navigator is the point of the window and
             # the section list is a place you visit, not somewhere you live.
             self.after(60, lambda: self._set_sidebar(False))
             self.set_status("Ready")
             self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # ---- master password
+        def _master_password_gate(self):
+            """Unlock the profile, or offer to protect it on first run."""
+            try:
+                configured = masterkey.is_configured()
+            except Exception:
+                return
+            if configured:
+                self._ask_unlock()
+            elif not guiconfig.get_master_prompt_seen():
+                self._offer_master_password()
+
+        def _ask_unlock(self):
+            """Ask for the master password; the app is unusable until it opens.
+
+            Loops rather than giving up, because the only alternatives are an
+            unlocked profile or quitting -- carrying on with a locked store
+            would show an empty session list and invite the user to overwrite
+            their own data.
+            """
+            while not masterkey.is_unlocked():
+                entered = self._prompt_secret(
+                    "Master password for this profile:", title="Unlock SSHDeck")
+                if entered is None:
+                    saved = masterkey.hint()
+                    if saved and messagebox.askyesno(
+                            "Unlock SSHDeck",
+                            "Show your password hint?", parent=self):
+                        messagebox.showinfo("Password hint", saved, parent=self)
+                        continue
+                    if messagebox.askretrycancel(
+                            "Unlock SSHDeck",
+                            "SSHDeck cannot open your saved sessions without "
+                            "the master password.\n\nRetry, or Cancel to quit.",
+                            parent=self):
+                        continue
+                    self._quitting = True
+                    self._on_close()
+                    return
+                try:
+                    masterkey.unlock(entered)
+                except SSHDeckError as exc:
+                    self._show_error(str(exc))
+                    continue
+                try:
+                    self._nav_refresh()
+                except Exception:
+                    pass
+                self.report_success("Profile unlocked.")
+
+        def _offer_master_password(self):
+            """First run: state the trade plainly, then let the user choose."""
+            guiconfig.set_master_prompt_seen(True)
+            want = messagebox.askyesno(
+                "Protect this profile?",
+                "Session profiles are stored in plain text.\n\n"
+                "A master password encrypts them, and is asked for each time "
+                "SSHDeck starts.\n\n"
+                "There is no recovery: if you forget it, the saved sessions "
+                "cannot be opened by anyone, including us.\n\n"
+                "Set a master password now?",
+                parent=self)
+            if want:
+                self._set_master_password()
+
+        def _set_master_password(self):
+            """Collect the password twice, plus an optional hint, then enable."""
+            while True:
+                first = self._prompt_secret("Choose a master password:",
+                                            title="Set master password")
+                if not first:
+                    return
+                second = self._prompt_secret("Confirm the master password:",
+                                             title="Set master password")
+                if second is None:
+                    return
+                if first != second:
+                    self._show_error("The two passwords do not match.")
+                    continue
+                hint = simpledialog.askstring(
+                    "Password hint (optional)",
+                    "A reminder, shown if you cannot get in.\n"
+                    "Stored unencrypted — do not reword the password itself.",
+                    parent=self) or ""
+                try:
+                    items = [x.to_dict() for x in sessionsmod.load_all()]
+                    masterkey.enable(first, items, hint.strip())
+                except SSHDeckError as exc:
+                    self._show_error(str(exc))
+                    return
+                self.report_success(
+                    "Profile protected — you will be asked for this password "
+                    "each time SSHDeck starts.")
+                return
 
         # ---- collapsible sidebar
         def _install_sidebar_toggle(self):

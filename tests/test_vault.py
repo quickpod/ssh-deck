@@ -179,3 +179,69 @@ def test_change_passphrase_uses_fresh_key_material(tmp_path):
     after = json.loads(open(p).read())
     assert before["salt"] != after["salt"]
     assert before["nonce"] != after["nonce"]
+
+
+# --------------------------------------------------------------------------- #
+# Password hint — readable without the passphrase, by design
+# --------------------------------------------------------------------------- #
+def test_hint_survives_a_round_trip(tmp_path):
+    p = str(tmp_path / "v.json")
+    vault.write_vault(p, SAMPLE, PW, hint="the usual one")
+    assert vault.read_hint(p) == "the usual one"
+    assert vault.read_vault(p, PW) == SAMPLE
+
+
+def test_hint_is_readable_without_the_passphrase(tmp_path):
+    """The whole point: someone locked out must still see their reminder."""
+    p = str(tmp_path / "v.json")
+    vault.write_vault(p, SAMPLE, PW, hint="my reminder")
+    with pytest.raises(WrongPassphrase):
+        vault.read_vault(p, "wrong")
+    assert vault.read_hint(p) == "my reminder"      # still legible
+
+
+def test_hint_cannot_be_altered_without_breaking_the_tag(tmp_path):
+    """It is plaintext but authenticated -- readable, not editable."""
+    p = str(tmp_path / "v.json")
+    vault.write_vault(p, SAMPLE, PW, hint="original")
+    env = json.load(open(p))
+    env["hint"] = "tampered"
+    with open(p, "w") as fh:
+        json.dump(env, fh)
+    with pytest.raises(WrongPassphrase):
+        vault.read_vault(p, PW)
+
+
+def test_no_hint_means_empty_not_an_error(tmp_path):
+    p = str(tmp_path / "v.json")
+    vault.write_vault(p, SAMPLE, PW)
+    assert vault.read_hint(p) == ""
+
+
+def test_hint_of_a_missing_or_foreign_file_is_empty(tmp_path):
+    assert vault.read_hint(str(tmp_path / "nope.json")) == ""
+    plain = tmp_path / "plain.json"
+    plain.write_text('{"not": "a vault"}', encoding="utf-8")
+    assert vault.read_hint(str(plain)) == ""
+
+
+def test_changing_the_passphrase_keeps_the_hint(tmp_path):
+    p = str(tmp_path / "v.json")
+    vault.write_vault(p, SAMPLE, PW, hint="keep me")
+    vault.change_passphrase(p, PW, "another one")
+    assert vault.read_hint(p) == "keep me"
+    assert vault.read_vault(p, "another one") == SAMPLE
+
+
+def test_changing_the_passphrase_can_replace_the_hint(tmp_path):
+    p = str(tmp_path / "v.json")
+    vault.write_vault(p, SAMPLE, PW, hint="old hint")
+    vault.change_passphrase(p, PW, "another one", hint="new hint")
+    assert vault.read_hint(p) == "new hint"
+
+
+def test_the_hint_never_leaks_the_contents(tmp_path):
+    p = str(tmp_path / "v.json")
+    vault.write_vault(p, SAMPLE, PW, hint="a reminder")
+    blob = open(p).read()
+    assert "hunter2" not in blob and "192.0.2.10" not in blob

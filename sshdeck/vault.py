@@ -136,9 +136,18 @@ def _derive(passphrase: str, salt: bytes, kdf: Dict[str, Any]) -> bytes:
     raise VaultError(f"Unsupported key-derivation method {name!r}.")
 
 
-def _header(salt: bytes, nonce: bytes, kdf: Dict[str, Any]) -> Dict[str, Any]:
-    return {"magic": MAGIC, "version": VERSION, "kdf": kdf,
-            "salt": _b64e(salt), "nonce": _b64e(nonce), "cipher": "AES-256-GCM"}
+def _header(salt: bytes, nonce: bytes, kdf: Dict[str, Any],
+            hint: str = "") -> Dict[str, Any]:
+    # The hint is deliberately outside the ciphertext: it has to be readable
+    # by someone who cannot open the vault, which is the entire point of a
+    # hint. It is authenticated as associated data, so it can be read but not
+    # altered without breaking the tag.
+    header = {"magic": MAGIC, "version": VERSION, "kdf": kdf,
+              "salt": _b64e(salt), "nonce": _b64e(nonce),
+              "cipher": "AES-256-GCM"}
+    if hint:
+        header["hint"] = hint
+    return header
 
 
 def _aad(header: Dict[str, Any]) -> bytes:
@@ -147,15 +156,20 @@ def _aad(header: Dict[str, Any]) -> bytes:
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def seal(data: Any, passphrase: str) -> Dict[str, Any]:
-    """Encrypt *data* (any JSON-serialisable value) into an envelope dict."""
+def seal(data: Any, passphrase: str, hint: str = "") -> Dict[str, Any]:
+    """Encrypt *data* into an envelope, optionally carrying a plaintext *hint*.
+
+    A hint is a reminder, not a secret: it is stored unencrypted so it can be
+    shown on the unlock screen. Anyone with the file can read it, which is why
+    the UI warns against making it a paraphrase of the passphrase.
+    """
     if not _CRYPTO:
         raise VaultError(
             "Encryption needs the 'cryptography' package, which is missing.")
     kdf = _default_kdf()
     salt = secrets.token_bytes(SALT_BYTES)
     nonce = secrets.token_bytes(NONCE_BYTES)
-    header = _header(salt, nonce, kdf)
+    header = _header(salt, nonce, kdf, hint)
     key = _derive(passphrase, salt, kdf)
     try:
         plaintext = json.dumps(data, separators=(",", ":")).encode("utf-8")
@@ -184,7 +198,7 @@ def open_envelope(envelope: Dict[str, Any], passphrase: str) -> Any:
     salt = _b64d(str(envelope.get("salt", "")))
     nonce = _b64d(str(envelope.get("nonce", "")))
     ct = _b64d(str(envelope.get("payload", "")))
-    header = _header(salt, nonce, kdf)
+    header = _header(salt, nonce, kdf, str(envelope.get("hint", "")))
     key = _derive(passphrase, salt, kdf)
     try:
         raw = AESGCM(key).decrypt(nonce, ct, _aad(header))
@@ -209,9 +223,26 @@ def is_vault_file(path: str) -> bool:
     return isinstance(head, dict) and head.get("magic") == MAGIC
 
 
-def write_vault(path: str, data: Any, passphrase: str) -> None:
+def read_hint(path: str) -> str:
+    """The password hint stored with the vault, or "" if there is none.
+
+    Readable without the passphrase by design -- the unlock screen shows it to
+    someone who cannot get in.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            envelope = json.load(fh)
+    except Exception:
+        return ""
+    if not isinstance(envelope, dict) or envelope.get("magic") != MAGIC:
+        return ""
+    hint = envelope.get("hint", "")
+    return hint if isinstance(hint, str) else ""
+
+
+def write_vault(path: str, data: Any, passphrase: str, hint: str = "") -> None:
     """Seal *data* to *path*, atomically and readable only by this user."""
-    envelope = seal(data, passphrase)
+    envelope = seal(data, passphrase, hint)
     tmp = path + ".tmp"
     try:
         directory = os.path.dirname(path)
@@ -245,7 +276,7 @@ def read_vault(path: str, passphrase: str) -> Any:
     return open_envelope(envelope, passphrase)
 
 
-def change_passphrase(path: str, old: str, new: str) -> None:
+def change_passphrase(path: str, old: str, new: str, hint: str = None) -> None:
     """Re-seal the vault under *new*, verifying *old* first.
 
     Re-derives a fresh salt and nonce, so the new file shares no key material
@@ -254,4 +285,7 @@ def change_passphrase(path: str, old: str, new: str) -> None:
     data = read_vault(path, old)
     if not new:
         raise VaultError("Enter the new passphrase.")
-    write_vault(path, data, new)
+    # Keep the existing hint unless a new one is given -- changing the
+    # passphrase does not silently strip the reminder.
+    keep = read_hint(path) if hint is None else hint
+    write_vault(path, data, new, keep)

@@ -41,7 +41,8 @@ def config_path():
 
 
 def _defaults():
-    return {"theme": "light", "recent": [], "global_key": ""}
+    return {"theme": "light", "recent": [], "global_key": "",
+            "master_prompt_seen": False}
 
 
 def load():
@@ -60,6 +61,7 @@ def load():
             gk = data.get("global_key")
             if isinstance(gk, str):
                 cfg["global_key"] = gk
+            cfg["master_prompt_seen"] = bool(data.get("master_prompt_seen", False))
     except Exception:
         pass  # missing/corrupt -> defaults; never fatal
     return cfg
@@ -73,6 +75,7 @@ def save(cfg):
             "theme": cfg.get("theme") if cfg.get("theme") in VALID_THEMES else "light",
             "recent": [p for p in cfg.get("recent", []) if isinstance(p, str)][:MAX_RECENT],
             "global_key": cfg.get("global_key", "") if isinstance(cfg.get("global_key", ""), str) else "",
+            "master_prompt_seen": bool(cfg.get("master_prompt_seen", False)),
         }
         tmp = config_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -127,4 +130,18 @@ def get_global_key():
 def set_global_key(path):
     cfg = load()
     cfg["global_key"] = str(path or "")
+    save(cfg)
+
+
+def get_master_prompt_seen():
+    """True once the first-run master-password offer has been shown.
+
+    Asking every launch would be nagging; asking once is an offer.
+    """
+    return bool(load().get("master_prompt_seen", False))
+
+
+def set_master_prompt_seen(flag):
+    cfg = load()
+    cfg["master_prompt_seen"] = bool(flag)
     save(cfg)

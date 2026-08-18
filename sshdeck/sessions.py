@@ -129,12 +129,31 @@ def _clean_auth(auth):
 
 
 # -- store CRUD --------------------------------------------------------------
+def _vaulted(path=None):
+    """True when this profile is protected and the caller gave no explicit path.
+
+    An explicit ``path`` means a test or an import pointing at a specific
+    file, which must keep working in the clear.
+    """
+    if path is not None:
+        return False
+    try:
+        from . import masterkey
+        return masterkey.is_configured()
+    except Exception:
+        return False
+
+
 def load_all(path=None):
     """Return the list of :class:`Session` from the store (``[]`` if none).
 
     A missing store is empty; a corrupt store raises :class:`SSHDeckError` so the
     user is told rather than silently losing every saved profile.
     """
+    if _vaulted(path):
+        from . import masterkey
+        data = masterkey.read()
+        return [Session.from_dict(d) for d in data if isinstance(d, dict)]
     p = store_path(path)
     if not os.path.exists(p):
         return []
@@ -150,6 +169,10 @@ def load_all(path=None):
 
 def save_all(sessions, path=None):
     """Write *sessions* (an iterable of :class:`Session`) to the store."""
+    if _vaulted(path):
+        from . import masterkey
+        masterkey.write([s.to_dict() for s in sessions])
+        return
     p = store_path(path)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
