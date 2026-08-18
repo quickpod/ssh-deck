@@ -19,7 +19,7 @@ from . import sessions, keys, forward, client, sftp
 from .sessions import Session
 from .forward import ForwardSpec, parse_forward
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 __all__ = [
     "SSHDeckError",
