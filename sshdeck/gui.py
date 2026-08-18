@@ -758,8 +758,27 @@ def build_app():
 
         # ---------- Terminal tabs (owned by the navigator) ----------
         # -- terminal tabs -------------------------------------------------- #
+        def _update_placeholder(self):
+            """Show the hint only while there is nothing to look at.
+
+            Left packed once a terminal opened, it sat above the view as a
+            block of dead space with instructions the user had plainly already
+            followed.
+            """
+            ph = getattr(self, "_nav_placeholder", None)
+            if ph is None:
+                return
+            try:
+                if self._terms:
+                    ph.pack_forget()
+                elif not ph.winfo_ismapped():
+                    ph.pack(pady=30)
+            except tk.TclError:
+                pass
+
         def _select_tab(self, tab_id):
             """Show one terminal; the others stay live but unpacked."""
+            self._update_placeholder()
             for tid, entry in self._terms.items():
                 try:
                     if tid == tab_id:
@@ -808,6 +827,7 @@ def build_app():
                 except tk.TclError:
                     pass
             self._tabs.remove(tab_id)
+            self._update_placeholder()
             if self._tabs.active:
                 self._select_tab(self._tabs.active)
             self._sftp_refresh_sessions()
@@ -962,7 +982,9 @@ def build_app():
                             command=self._close_all_tabs).pack(
                 side="right", padx=(8, 0))
             self._term_area = ctk.CTkFrame(right, fg_color="transparent")
-            self._term_area.pack(fill="both", expand=True, pady=(6, 0))
+            # No gap: the terminal belongs directly under its tab, the way a
+            # browser's page meets its tab strip.
+            self._term_area.pack(fill="both", expand=True)
 
             self._nav_placeholder = aura.Caption(
                 self._term_area,
@@ -1082,6 +1104,7 @@ def build_app():
             self._terms[tab_id] = {"view": view, "chan": chan, "stop": stop,
                                    "client": conn, "session": session}
             self._tabs.set_state(tab_id, navigator.CONNECTED)
+            self._update_placeholder()
             self._tabs.select(tab_id)
             self._start_reader(tab_id, chan, stop)
             self._sftp_refresh_sessions()
