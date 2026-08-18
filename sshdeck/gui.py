@@ -43,8 +43,8 @@ ACCENT = "#2ecf80"      # UI-accent registry override (icon is near-black)
 # (section_id, label, glyph) -- section_id maps to a _build_<id> method.
 # Glyphs are DejaVu-safe (verified against the font cmap; see aura README §6).
 SECTIONS = [
+    ("navigator", "Navigator", "▤"),
     ("sessions", "Sessions", "⛁"),
-    ("terminal", "Terminal", "▸"),
     ("sftp", "SFTP", "⇅"),
     ("keys", "Keys", "⚲"),
     ("forwards", "Port Forwards", "⇄"),
@@ -52,6 +52,8 @@ SECTIONS = [
 ]
 
 SECTION_DESCRIPTIONS = {
+    "navigator": "Your sessions on the left, terminals on the right. "
+                 "Double-click a session to open it in a new tab.",
     "sessions": "Saved connection profiles. Add, edit, connect — passwords and "
                 "passphrases are asked for at connect time, never stored.",
     "terminal": "An interactive shell over the current connection.",
@@ -175,7 +177,7 @@ def build_app():
             for sid, label, glyph in SECTIONS:
                 self.add_section(sid, label, glyph,
                                  getattr(self, "_build_" + sid))
-            self.show("sessions")
+            self.show("navigator")
             self.set_status("Ready")
             self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -310,7 +312,7 @@ def build_app():
         def _prompt_secret(self, prompt, title="SSHDeck"):
             return simpledialog.askstring(title, prompt, show="*", parent=self)
 
-        def connect(self, session):
+        def connect(self, session, then=None):
             if session is None:
                 self._show_error("Choose a session first.")
                 return
@@ -347,6 +349,13 @@ def build_app():
                 self._fill_recent_menu()
                 self._update_conn_label()
                 self.report_success(f"Connected to {session.target()}.")
+                if then is not None:
+                    # Runs on the UI thread, after the client is live -- the
+                    # navigator uses it to open the tab in one gesture.
+                    try:
+                        then()
+                    except Exception:
+                        pass
 
             self._bg(work, ok, busy=f"Connecting to {session.host}…")
 
@@ -556,30 +565,7 @@ def build_app():
                 return
             self.connect(session)
 
-        # ---------- Terminal ----------
-        def _build_terminal(self, frame):
-            self._intro(frame, "terminal")
-            top = ctk.CTkFrame(frame, fg_color="transparent")
-            top.pack(fill="x")
-            self._term_btn = aura.AuraButton(top, "Open shell", kind="primary",
-                                             command=self._open_shell)
-            self._term_btn.pack(side="left")
-            aura.AuraButton(top, "Close tab", kind="secondary",
-                            command=self._stop_shell).pack(side="left", padx=8)
-            aura.Caption(top, "Each connection opens its own tab.").pack(
-                side="left", padx=(12, 0))
-
-            # Tabs across the top, terminals stacked beneath — the SecureCRT
-            # arrangement. Only the active tab's view is packed; the rest keep
-            # running and buffering in the background.
-            self._tabs = navigator.TabStrip(
-                frame, on_select=self._select_tab, on_close=self._close_tab)
-            self._tabs.pack(fill="x", pady=(12, 0))
-            self._term_area = ctk.CTkFrame(frame, fg_color="transparent")
-            self._term_area.pack(fill="both", expand=True, pady=(6, 0))
-            self._terms = {}          # tab id -> dict(view, chan, stop, session)
-            self._term_seq = 0
-
+        # ---------- Terminal tabs (owned by the navigator) ----------
         # -- terminal tabs -------------------------------------------------- #
         def _select_tab(self, tab_id):
             """Show one terminal; the others stay live but unpacked."""
@@ -705,6 +691,80 @@ def build_app():
             except Exception:
                 pass
             return name or "shell"
+
+        # ---------- Navigator: tree + terminal tabs in one window ----------
+        def _build_navigator(self, frame):
+            """The primary screen: sessions always in view, terminals beside them.
+
+            The session list and the terminals used to live on separate screens,
+            so opening a second host meant navigating away from the first. Here
+            they share one window, which is the whole point of the layout.
+            """
+            split = ctk.CTkFrame(frame, fg_color="transparent")
+            split.pack(fill="both", expand=True)
+
+            # -- left dock: the session tree
+            left = ctk.CTkFrame(split, width=250)
+            left.pack(side="left", fill="y", padx=(0, 10))
+            left.pack_propagate(False)
+            aura.SectionLabel(left, "SESSIONS").pack(anchor="w", padx=8,
+                                                     pady=(8, 2))
+            self._nav_tree = navigator.SessionTree(
+                left,
+                on_connect=self._nav_connect,
+                on_select=self._nav_select)
+            self._nav_tree.pack(fill="both", expand=True, padx=4, pady=(0, 6))
+
+            navbtns = ctk.CTkFrame(left, fg_color="transparent")
+            navbtns.pack(fill="x", padx=6, pady=(0, 8))
+            aura.AuraButton(navbtns, "Connect", kind="primary",
+                            command=lambda: self._nav_connect(
+                                self._nav_tree.selected_name())).pack(
+                side="left", padx=(0, 6))
+            aura.AuraButton(navbtns, "Edit", kind="secondary",
+                            command=lambda: self.show("sessions")).pack(
+                side="left")
+
+            # -- right: tabs over the stacked terminals
+            right = ctk.CTkFrame(split, fg_color="transparent")
+            right.pack(side="left", fill="both", expand=True)
+            self._tabs = navigator.TabStrip(
+                right, on_select=self._select_tab, on_close=self._close_tab)
+            self._tabs.pack(fill="x")
+            self._term_area = ctk.CTkFrame(right, fg_color="transparent")
+            self._term_area.pack(fill="both", expand=True, pady=(6, 0))
+
+            self._nav_placeholder = aura.Caption(
+                self._term_area,
+                "Double-click a session on the left to open a terminal.")
+            self._nav_placeholder.pack(pady=30)
+            self._nav_refresh()
+
+        def _nav_refresh(self):
+            try:
+                self._nav_tree.set_sessions(sessionsmod.load_all())
+            except Exception:
+                pass
+
+        def _nav_select(self, name):
+            """Selecting only previews; connecting is a deliberate act."""
+            self.set_status(f"{name} selected — double-click to connect")
+
+        def _nav_connect(self, name):
+            """Connect (if needed) and open a terminal tab for *name*."""
+            if not name:
+                return
+            try:
+                session = sessionsmod.get(name)
+            except SSHDeckError as exc:
+                self._show_error(str(exc))
+                return
+            if self._client is None:
+                self.connect(session, then=self._open_shell)
+            else:
+                # Already connected: a second tab on the same host is just
+                # another shell, no reconnection needed.
+                self._open_shell()
 
         # ---------- SFTP ----------
         def _build_sftp(self, frame):
