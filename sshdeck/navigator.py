@@ -22,8 +22,13 @@ decide.  That keeps them testable and keeps connection handling in one place.
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 from typing import Callable, Dict, List, Optional
+
+#: Compact metrics for the docked session tree.
+ROW_HEIGHT = 19
+INDENT = 14
 
 # --- tab states ------------------------------------------------------------ #
 CONNECTING = "connecting"
@@ -63,14 +68,31 @@ class SessionTree(tk.Frame):
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self.refresh())
         self.filter_entry = ttk.Entry(self, textvariable=self.filter_var)
-        self.filter_entry.pack(fill="x", padx=4, pady=(4, 2))
+        self.filter_entry.pack(fill="x", padx=4, pady=(3, 2))
 
-        self.tree = ttk.Treeview(self, show="tree", selectmode="browse")
+        # A session list is scanned, not read: a compact row height and a
+        # smaller face fit far more hosts on screen, which is the whole point
+        # of having the tree permanently docked.
+        # ttk resolves a style's layout from the trailing component, so the
+        # name must END with the widget class or the layout is not found.
+        self._style_name = f"Compact{id(self)}.Treeview"
+        try:
+            style = ttk.Style(self)
+            base = tkfont.nametofont("TkDefaultFont").copy()
+            base.configure(size=max(7, base.cget("size") - 1))
+            self._tree_font = base
+            style.configure(self._style_name, font=base, rowheight=ROW_HEIGHT,
+                            indent=INDENT)
+            tree_kw = {"style": self._style_name}
+        except Exception:
+            tree_kw = {}
+        self.tree = ttk.Treeview(self, show="tree", selectmode="browse",
+                                 **tree_kw)
         scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True, padx=(4, 0),
-                       pady=(0, 4))
+                       pady=(0, 3))
 
         self.tree.bind("<Double-1>", self._double_click)
         self.tree.bind("<Return>", self._double_click)
