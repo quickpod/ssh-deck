@@ -20,6 +20,7 @@ What it does beyond drawing characters:
 
 from __future__ import annotations
 
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable, Optional
@@ -29,6 +30,8 @@ from .screen import Screen
 
 DEFAULT_FONT = ("DejaVu Sans Mono", 11)
 CURSOR_TAG = "term_cursor"
+#: Longest a selection may hold back a repaint before output wins.
+MAX_DEFER_SECONDS = 5.0
 REDRAW_MS = 16                     # ~60fps ceiling on repaints
 
 
@@ -50,6 +53,7 @@ class TerminalView(tk.Frame):
         self._fit_job = None
         self._last_grid = (rows, cols)
         self._redraw_pending = False   # output arrived while text was selected
+        self._defer_started = 0.0      # when the current deferral began
         self._tags: set = set()
         self._redraw_job = None
         self._last_title = ""
@@ -141,7 +145,9 @@ class TerminalView(tk.Frame):
         # selection mid-drag and make copy-on-select unusable on a chatty
         # terminal. Hold the repaint until the selection is released; the
         # screen buffer keeps accumulating either way, so nothing is lost.
-        if self.has_selection():
+        if self.has_selection() and not self._defer_expired():
+            if not self._redraw_pending:
+                self._defer_started = time.monotonic()
             self._redraw_pending = True
             try:
                 self.after(250, self._redraw_if_free)
@@ -176,11 +182,28 @@ class TerminalView(tk.Frame):
             pass       # widget went away mid-redraw (tab closed)
 
     # -- input -------------------------------------------------------------- #
+    def _clear_selection(self) -> None:
+        """Drop any selection and let held-back output paint.
+
+        Sending input means the user has finished with what they highlighted;
+        holding the screen frozen after that makes the terminal look dead --
+        the pasted command goes to the shell but nothing appears until
+        something else happens to clear the selection.
+        """
+        try:
+            if self.text.tag_ranges("sel"):
+                self.text.tag_remove("sel", "1.0", "end")
+        except tk.TclError:
+            return
+        if self._redraw_pending:
+            self._schedule_redraw()
+
     def _on_key(self, event) -> str:
         if self._on_input is None:
             return "break"
         data = self._encode(event)
         if data:
+            self._clear_selection()
             try:
                 self._on_input(data)
             except Exception:
@@ -250,9 +273,19 @@ class TerminalView(tk.Frame):
         except tk.TclError:
             pass
 
+    def _defer_expired(self) -> bool:
+        """True once output has been held back for too long.
+
+        A selection left sitting must not freeze the screen forever: after
+        this the repaint wins and the selection is lost, which is far less
+        confusing than a terminal that has stopped responding.
+        """
+        return (self._redraw_pending
+                and time.monotonic() - self._defer_started > MAX_DEFER_SECONDS)
+
     def _redraw_if_free(self) -> None:
         """Repaint once the user has let go of their selection."""
-        if self.has_selection():
+        if self.has_selection() and not self._defer_expired():
             try:
                 self.after(250, self._redraw_if_free)
             except tk.TclError:
@@ -283,6 +316,7 @@ class TerminalView(tk.Frame):
         except tk.TclError:
             return "break"
         if data:
+            self._clear_selection()
             try:
                 self._on_input(data)
             except Exception:
