@@ -144,6 +144,108 @@ class SFTP:
             raise SSHDeckError(f"could not rename {old} -> {new}: {exc}")
         return new
 
+    def put_tree(self, local_dir, remote_dir, callback=None, on_file=None):
+        """Upload a directory recursively, creating remote folders as needed.
+
+        ``callback(done, total)`` reports bytes across the whole tree, not per
+        file, so a progress bar advances smoothly through a folder of many
+        small files instead of snapping back to zero on each one.
+        ``on_file(rel_path)`` is called as each file starts.
+        """
+        local_dir = os.path.abspath(local_dir)
+        if not os.path.isdir(local_dir):
+            raise SSHDeckError(f"not a directory: {local_dir}")
+
+        files, total = [], 0
+        for root, _dirs, names in os.walk(local_dir):
+            for name in names:
+                full = os.path.join(root, name)
+                try:
+                    total += os.path.getsize(full)
+                except OSError:
+                    continue
+                files.append((full, os.path.relpath(full, local_dir)))
+
+        base = remote_dir.rstrip("/") + "/" + os.path.basename(local_dir)
+        self.makedirs(base)
+        sent = 0
+        for full, rel in files:
+            target = base + "/" + rel.replace(os.sep, "/")
+            parent = target.rsplit("/", 1)[0]
+            self.makedirs(parent)
+            if on_file:
+                on_file(rel)
+            start = sent
+
+            def per_file(done, _size, _start=start):
+                if callback and total:
+                    callback(min(_start + done, total), total)
+
+            self.put(full, target, callback=per_file if callback else None)
+            try:
+                sent += os.path.getsize(full)
+            except OSError:
+                pass
+        if callback and total:
+            callback(total, total)
+        return len(files)
+
+    def get_tree(self, remote_dir, local_dir, callback=None, on_file=None):
+        """Download a directory recursively, mirroring it under *local_dir*."""
+        base = os.path.join(local_dir, remote_dir.rstrip("/").rsplit("/", 1)[-1])
+
+        # Walk the remote side first so the total is known before transferring;
+        # without it there is no denominator for progress.
+        files, total = [], 0
+        stack = [(remote_dir.rstrip("/"), "")]
+        while stack:
+            rpath, rel = stack.pop()
+            for entry in self.listdir(rpath):
+                child = rpath + "/" + entry.name
+                crel = (rel + "/" + entry.name) if rel else entry.name
+                if entry.is_dir:
+                    stack.append((child, crel))
+                else:
+                    files.append((child, crel, entry.size))
+                    total += entry.size or 0
+
+        os.makedirs(base, exist_ok=True)
+        got = 0
+        for rpath, rel, _size in files:
+            target = os.path.join(base, rel.replace("/", os.sep))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if on_file:
+                on_file(rel)
+            start = got
+
+            def per_file(done, _size2, _start=start):
+                if callback and total:
+                    callback(min(_start + done, total), total)
+
+            self.get(rpath, target, callback=per_file if callback else None)
+            try:
+                got += os.path.getsize(target)
+            except OSError:
+                pass
+        if callback and total:
+            callback(total, total)
+        return len(files)
+
+    def makedirs(self, path):
+        """Create *path* and any missing parents (remote ``mkdir -p``)."""
+        parts = [p for p in path.strip("/").split("/") if p]
+        cur = "/" if path.startswith("/") else ""
+        for part in parts:
+            cur = (cur.rstrip("/") + "/" + part) if cur else part
+            if not self.exists(cur):
+                try:
+                    self.mkdir(cur)
+                except SSHDeckError:
+                    # A parallel transfer may have created it between the
+                    # check and the call; only a still-missing path is fatal.
+                    if not self.exists(cur):
+                        raise
+
     def close(self):
         try:
             self._sftp.close()

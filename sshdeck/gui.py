@@ -711,6 +711,7 @@ def build_app():
             self._tabs.remove(tab_id)
             if self._tabs.active:
                 self._select_tab(self._tabs.active)
+            self._sftp_refresh_sessions()
 
         def _stop_shell(self):
             if self._tabs.active:
@@ -838,7 +839,10 @@ def build_app():
                                 self._nav_tree.selected_name())).pack(
                 side="left", padx=(0, 6))
             aura.AuraButton(navbtns, "Edit", kind="secondary",
-                            command=self._nav_edit).pack(side="left")
+                            command=self._nav_edit).pack(side="left",
+                                                         padx=(0, 6))
+            aura.AuraButton(navbtns, "New", kind="secondary",
+                            command=self._nav_new).pack(side="left")
 
             # -- right: tabs over the stacked terminals
             right = ctk.CTkFrame(split, fg_color="transparent")
@@ -867,6 +871,12 @@ def build_app():
                 self._nav_tree.set_sessions(sessionsmod.load_all())
             except Exception:
                 pass
+
+        def _nav_new(self):
+            """Start a new session from the navigator, with a blank form."""
+            self.show("sessions")
+            self._new_session()
+            self.set_status("New session — fill in the details and Save")
 
         def _nav_edit(self):
             """Open the Sessions editor on whatever the navigator has selected.
@@ -970,6 +980,7 @@ def build_app():
             self._tabs.set_state(tab_id, navigator.CONNECTED)
             self._tabs.select(tab_id)
             self._start_reader(tab_id, chan, stop)
+            self._sftp_refresh_sessions()
             guiconfig.add_recent(session.name)
             self.report_success(f"Connected to {session.target()}.")
 
@@ -1001,13 +1012,24 @@ def build_app():
             self._intro(frame, "sftp")
             top = ctk.CTkFrame(frame, fg_color="transparent")
             top.pack(fill="x")
+            # Which host the remote pane talks to. Previously SFTP silently
+            # followed whichever terminal tab happened to be active, so with
+            # several open there was no way to say "browse that one".
+            aura.Caption(top, "Session").pack(side="left", padx=(0, 8))
+            self._sftp_session = tk.StringVar()
+            self._sftp_pick = aura.AuraOption(
+                top, values=["(no sessions)"], width=210,
+                variable=self._sftp_session, command=self._sftp_choose)
+            self._sftp_pick.pack(side="left")
             aura.AuraButton(top, "Connect remote pane", kind="secondary",
-                            command=self._sftp_open).pack(side="left")
+                            command=self._sftp_open).pack(side="left", padx=8)
             aura.Caption(top, "Local (left) ⇄ remote (right).").pack(
                 side="left", padx=(12, 0))
+            self._sftp_refresh_sessions()
 
             panes = ctk.CTkFrame(frame, fg_color="transparent")
             panes.pack(fill="both", expand=True, pady=(12, 0))
+            self.after(0, lambda: self._build_xfer_queue(frame))
 
             # local pane
             lp = aura.Card(panes, title="Local")
@@ -1108,6 +1130,141 @@ def build_app():
             return os.path.join(self._local_path.get(),
                                 self._local_entries[sel[0]])
 
+        # ---- transfer queue -------------------------------------------- #
+        def _build_xfer_queue(self, parent):
+            """A running list of transfers under the panes.
+
+            A single progress bar says how far the current file has got and
+            nothing about what else happened; with folder transfers moving
+            hundreds of files that is not enough to tell what worked.
+            """
+            card = aura.Card(parent, title="Transfers")
+            card.pack(fill="x", pady=(10, 0))
+            cols = ("dir", "name", "size", "status")
+            self._queue = ttk.Treeview(card.body, columns=cols, show="headings",
+                                       height=5, selectmode="browse")
+            for col, text, width in (("dir", "", 34), ("name", "Item", 320),
+                                     ("size", "Size", 90),
+                                     ("status", "Status", 210)):
+                self._queue.heading(col, text=text)
+                self._queue.column(col, width=width,
+                                   anchor="w" if col == "name" else "center",
+                                   stretch=(col == "name"))
+            sb = ttk.Scrollbar(card.body, orient="vertical",
+                               command=self._queue.yview)
+            self._queue.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            self._queue.pack(side="left", fill="x", expand=True)
+            self._queue.tag_configure("ok", foreground="#26a269")
+            self._queue.tag_configure("err", foreground="#c01c28")
+            self._queue.tag_configure("busy", foreground="#2a7bde")
+            row = ctk.CTkFrame(card.body, fg_color="transparent")
+            aura.AuraButton(row, "Clear finished", kind="secondary",
+                            command=self._queue_clear).pack(side="left")
+            row.pack(side="bottom", anchor="w", pady=(6, 0))
+            self._queue_seq = 0
+
+        def _queue_add(self, direction, name, size_text=""):
+            """Add a row and return its id, or None if the panel is absent."""
+            queue = getattr(self, "_queue", None)
+            if queue is None:
+                return None
+            self._queue_seq += 1
+            item = f"x{self._queue_seq}"
+            try:
+                queue.insert("", 0, iid=item,
+                             values=("↑" if direction == "up" else "↓",
+                                     name, size_text, "starting…"),
+                             tags=("busy",))
+                queue.see(item)
+            except tk.TclError:
+                return None
+            return item
+
+        def _queue_status(self, item, text, tag="busy"):
+            if item is None or getattr(self, "_queue", None) is None:
+                return
+            try:
+                self._queue.set(item, "status", text)
+                self._queue.item(item, tags=(tag,))
+            except tk.TclError:
+                pass
+
+        def _queue_progress(self, item, done, total):
+            if item is None or not total:
+                return
+            pct = int(done * 100 / total)
+            self._queue_status(item, f"{pct}%  ({human_size(done)} / {human_size(total)})")
+
+        def _queue_clear(self):
+            queue = getattr(self, "_queue", None)
+            if queue is None:
+                return
+            for item in queue.get_children():
+                tags = queue.item(item, "tags") or ()
+                if "busy" not in tags:
+                    queue.delete(item)
+
+        def _sftp_refresh_sessions(self):
+            """Populate the picker: connected tabs first, then saved sessions."""
+            live = []
+            for entry in getattr(self, "_terms", {}).values():
+                sess = entry.get("session")
+                if sess is not None and sess.name not in live:
+                    live.append(sess.name)
+            try:
+                saved = [x.name for x in sessionsmod.load_all()]
+            except SSHDeckError:
+                saved = []
+            # Connected ones are marked, so picking a live host is obviously
+            # free while picking another means opening a connection.
+            values = [f"● {n}" for n in live] + [n for n in saved if n not in live]
+            if not values:
+                values = ["(no sessions)"]
+            try:
+                self._sftp_pick.configure(values=values)
+                current = self._sftp_session.get()
+                if current not in values:
+                    self._sftp_session.set(values[0])
+            except Exception:
+                pass
+
+        def _sftp_choose(self, choice=None):
+            """Bind the remote pane to the chosen session, connecting if needed."""
+            name = (choice or self._sftp_session.get() or "").lstrip("● ").strip()
+            if not name or name == "(no sessions)":
+                return
+            # Reuse a live connection when the session already has a tab.
+            for entry in getattr(self, "_terms", {}).values():
+                sess = entry.get("session")
+                if sess is not None and sess.name == name:
+                    self._client = entry.get("client")
+                    self._session = sess
+                    self._update_conn_label()
+                    self._sftp_open()
+                    return
+            try:
+                session = sessionsmod.get(name)
+            except SSHDeckError as exc:
+                self._show_error(str(exc))
+                return
+            creds = self._prompt_credentials(session)
+            if creds is None:
+                return
+            password, passphrase, pkey = creds
+
+            def work():
+                return sshclient.connect(session, password=password,
+                                         passphrase=passphrase, pkey=pkey)
+
+            def ok(conn):
+                self._client = conn
+                self._session = session
+                self._update_conn_label()
+                self._sftp_open()
+
+            self._bg(work, ok, busy=f"Connecting to {session.host}…")
+
         def _sftp_open(self):
             if not self._require_connection():
                 return
@@ -1163,33 +1320,81 @@ def build_app():
                 self._show_error("Open the remote pane first.")
                 return
             local = self._selected_local()
-            if not local or not os.path.isfile(local):
-                self._show_error("Select a local file to upload.")
+            if not local or not os.path.exists(local):
+                self._show_error("Select a local file or folder to upload.")
                 return
-            remote = self._remote_path.get().rstrip("/") + "/" + os.path.basename(local)
+            remote_dir = self._remote_path.get().rstrip("/")
             self._xfer_prog.set(0)
-            self._bg(lambda: self._sftp.put(local, remote,
-                                            callback=self._xfer_progress),
+            if os.path.isdir(local):
+                name = os.path.basename(local.rstrip(os.sep))
+                item = self._queue_add("up", name + "/  (folder)")
+                self._bg(
+                    lambda: self._sftp.put_tree(
+                        local, remote_dir,
+                        callback=lambda d, t: (self._xfer_progress(d, t),
+                                               self._queue_progress(item, d, t)),
+                        on_file=lambda rel: self._queue_status(
+                            item, f"↑ {rel}")),
+                    lambda n: (self._remote_refresh(),
+                               self._queue_status(item, f"done — {n} file(s)", "ok"),
+                               self.report_success(
+                                   f"Uploaded {n} file(s) → {remote_dir}/{name}")),
+                    busy="Uploading folder…",
+                    on_error=lambda: self._queue_status(item, "failed", "err"))
+                return
+            remote = remote_dir + "/" + os.path.basename(local)
+            size = os.path.getsize(local) if os.path.exists(local) else 0
+            item = self._queue_add("up", os.path.basename(local),
+                                   human_size(size))
+            self._bg(lambda: self._sftp.put(
+                        local, remote,
+                        callback=lambda d, t: (self._xfer_progress(d, t),
+                                               self._queue_progress(item, d, t))),
                      lambda r: (self._remote_refresh(),
+                                self._queue_status(item, "done", "ok"),
                                 self.report_success(f"Uploaded → {remote}")),
-                     busy="Uploading…")
+                     busy="Uploading…",
+                     on_error=lambda: self._queue_status(item, "failed", "err"))
 
         def _sftp_download(self):
             if self._sftp is None:
                 self._show_error("Open the remote pane first.")
                 return
             e = self._selected_remote()
-            if not e or e.is_dir:
-                self._show_error("Select a remote file to download.")
+            if not e:
+                self._show_error("Select a remote file or folder to download.")
                 return
             remote = self._remote_path.get().rstrip("/") + "/" + e.name
-            local = os.path.join(self._local_path.get(), e.name)
+            local_dir = self._local_path.get()
             self._xfer_prog.set(0)
-            self._bg(lambda: self._sftp.get(remote, local,
-                                            callback=self._xfer_progress),
+            if e.is_dir:
+                item = self._queue_add("down", e.name + "/  (folder)")
+                self._bg(
+                    lambda: self._sftp.get_tree(
+                        remote, local_dir,
+                        callback=lambda d, t: (self._xfer_progress(d, t),
+                                               self._queue_progress(item, d, t)),
+                        on_file=lambda rel: self._queue_status(
+                            item, f"↓ {rel}")),
+                    lambda n: (self._local_refresh(),
+                               self._queue_status(item, f"done — {n} file(s)", "ok"),
+                               self.report_success(
+                                   f"Downloaded {n} file(s) → "
+                                   f"{os.path.join(local_dir, e.name)}")),
+                    busy="Downloading folder…",
+                    on_error=lambda: self._queue_status(item, "failed", "err"))
+                return
+            local = os.path.join(local_dir, e.name)
+            item = self._queue_add("down", e.name, human_size(e.size or 0))
+            self._bg(lambda: self._sftp.get(
+                        remote, local,
+                        callback=lambda d, t: (self._xfer_progress(d, t),
+                                               self._queue_progress(item, d, t))),
                      lambda r: (self._local_refresh(),
+                                self._queue_status(item, "done", "ok"),
                                 self.report_success(f"Downloaded → {local}")),
-                     busy="Downloading…")
+                     busy="Downloading…",
+                     on_error=lambda: self._queue_status(item, "failed", "err"))
 
         def _sftp_mkdir(self):
             if self._sftp is None:
