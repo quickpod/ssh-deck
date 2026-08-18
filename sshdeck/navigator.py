@@ -48,6 +48,16 @@ STATE_STYLE: Dict[str, Dict[str, str]] = {
 }
 
 
+#: Tab chrome. A raised/sunken border is nearly invisible on a dark theme, so
+#: the active tab is distinguished by fill and text colour as well, and carries
+#: an accent underline -- three cues, not one.
+TAB_ACTIVE_BG = "#2a3550"
+TAB_ACTIVE_FG = "#ffffff"
+TAB_ACTIVE_ACCENT = "#5b86f7"
+TAB_IDLE_BG = "#1b1d22"
+TAB_IDLE_FG = "#9aa0a6"
+
+
 def state_style(state: str) -> Dict[str, str]:
     return STATE_STYLE.get(state, STATE_STYLE[DISCONNECTED])
 
@@ -181,21 +191,29 @@ class TabStrip(tk.Frame):
     def add(self, tab_id: str, label: str, state: str = CONNECTING) -> None:
         if tab_id in self._tabs:
             return
-        holder = tk.Frame(self, bd=1, relief="raised")
-        dot = tk.Label(holder, text=state_style(state)["glyph"],
-                       fg=state_style(state)["colour"])
-        title = tk.Label(holder, text=label)
-        close = tk.Label(holder, text="✕", cursor="hand2")
-        dot.pack(side="left", padx=(6, 2))
+        holder = tk.Frame(self, bd=0, background=TAB_IDLE_BG)
+        body = tk.Frame(holder, bd=0, background=TAB_IDLE_BG)
+        body.pack(side="top", fill="x")
+        dot = tk.Label(body, text=state_style(state)["glyph"],
+                       fg=state_style(state)["colour"], background=TAB_IDLE_BG)
+        title = tk.Label(body, text=self._elide(label), fg=TAB_IDLE_FG,
+                         background=TAB_IDLE_BG)
+        close = tk.Label(body, text="✕", cursor="hand2", fg=TAB_IDLE_FG,
+                         background=TAB_IDLE_BG)
+        dot.pack(side="left", padx=(8, 3))
         title.pack(side="left", padx=(0, 6))
-        close.pack(side="left", padx=(0, 6))
+        close.pack(side="left", padx=(0, 8))
+        # A 2px accent strip under the active tab, the way a browser marks one.
+        accent = tk.Frame(holder, height=2, background=TAB_IDLE_BG)
+        accent.pack(side="bottom", fill="x")
         holder.pack(side="left", padx=(0, 2))
 
-        for widget in (holder, dot, title):
+        for widget in (holder, body, dot, title):
             widget.bind("<Button-1>", lambda _e, i=tab_id: self.select(i))
         close.bind("<Button-1>", lambda _e, i=tab_id: self._close(i))
 
-        self._tabs[tab_id] = {"frame": holder, "dot": dot, "title": title,
+        self._tabs[tab_id] = {"frame": holder, "body": body, "dot": dot,
+                              "title": title, "close": close, "accent": accent,
                               "state": state, "label": label}
         self._order.append(tab_id)
         if self.active is None:
@@ -274,9 +292,19 @@ class TabStrip(tk.Frame):
 
     def _restyle(self) -> None:
         for tab_id, tab in self._tabs.items():
+            active = tab_id == self.active
+            bg = TAB_ACTIVE_BG if active else TAB_IDLE_BG
+            fg = TAB_ACTIVE_FG if active else TAB_IDLE_FG
             try:
-                tab["frame"].configure(
-                    relief="sunken" if tab_id == self.active else "raised")
+                tab["frame"].configure(background=bg)
+                tab["body"].configure(background=bg)
+                tab["title"].configure(background=bg, fg=fg)
+                tab["close"].configure(background=bg, fg=fg)
+                # The state dot keeps its own colour -- it means something
+                # different from "this is the tab you are looking at".
+                tab["dot"].configure(background=bg)
+                tab["accent"].configure(
+                    background=TAB_ACTIVE_ACCENT if active else bg)
             except tk.TclError:
                 pass
 
