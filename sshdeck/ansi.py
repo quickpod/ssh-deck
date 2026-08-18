@@ -39,6 +39,29 @@ CARRIAGE_RETURN = "carriage_return"
 BACKSPACE = "backspace"
 BELL = "bell"
 SET_TITLE = "set_title"
+# Cursor addressing and editing -- what full-screen programs (vi, top, htop)
+# rely on. A scrollback-only view can ignore these; a screen buffer cannot.
+CURSOR_POS = "cursor_pos"            # value: "row;col" (1-based, may be empty)
+CURSOR_UP = "cursor_up"
+CURSOR_DOWN = "cursor_down"
+CURSOR_FORWARD = "cursor_forward"
+CURSOR_BACK = "cursor_back"
+CURSOR_COLUMN = "cursor_column"
+CURSOR_SAVE = "cursor_save"
+CURSOR_RESTORE = "cursor_restore"
+INSERT_LINES = "insert_lines"
+DELETE_LINES = "delete_lines"
+INSERT_CHARS = "insert_chars"
+DELETE_CHARS = "delete_chars"
+ERASE_CHARS = "erase_chars"
+SCROLL_UP = "scroll_up"
+SCROLL_DOWN = "scroll_down"
+SET_SCROLL_REGION = "set_scroll_region"
+ALT_SCREEN = "alt_screen"            # value: "1" enter, "0" leave
+CURSOR_VISIBLE = "cursor_visible"    # value: "1" show, "0" hide
+LINE_FEED = "line_feed"
+REVERSE_INDEX = "reverse_index"
+TAB = "tab"
 
 
 #: The Ubuntu/GNOME palette -- what `ls` colours look like on the servers this
@@ -177,7 +200,9 @@ class AnsiParser:
                 flush(); out.append(Action(BACKSPACE)); i += 1; continue
             if ch == BEL:
                 flush(); out.append(Action(BELL)); i += 1; continue
-            if ch == "\t" or ch == "\n" or ch >= " " or ch == "\x00":
+            if ch == "\t":
+                flush(); out.append(Action(TAB)); i += 1; continue
+            if ch == "\n" or ch >= " " or ch == "\x00":
                 if ch != "\x00":            # NUL is padding; drop it
                     text.append(ch)
                 i += 1
@@ -222,13 +247,29 @@ class AnsiParser:
         if kind == "P" or kind == "^" or kind == "_":   # DCS/PM/APC to ST
             j = buf.find(ESC + "\\", i + 2)
             return j + 2 if j != -1 else None
-        # Simple two-character escapes (RIS, IND, NEL, DECSC...): ignore.
+        if kind == "7":
+            flush(); out.append(Action(CURSOR_SAVE)); return i + 2
+        if kind == "8":
+            flush(); out.append(Action(CURSOR_RESTORE)); return i + 2
+        if kind == "M":
+            flush(); out.append(Action(REVERSE_INDEX)); return i + 2
+        if kind in ("D", "E"):
+            flush(); out.append(Action(LINE_FEED)); return i + 2
+        # Other two-character escapes (RIS, DECALN...): ignore.
         return i + 2
 
     def _csi(self, params: str, final: str, out: List[object], flush) -> None:
         if params.startswith("?"):
-            # Private modes: bracketed paste (2004), cursor visibility (25),
-            # alt screen (1049)... none change how text is rendered here.
+            # Private modes. Bracketed paste (2004) and the rest are noise
+            # here, but alt-screen and cursor visibility change what the
+            # screen buffer must show, so they are reported.
+            if final in ("h", "l"):
+                on = "1" if final == "h" else "0"
+                for raw in params[1:].split(";"):
+                    if raw in ("1049", "47", "1047"):
+                        flush(); out.append(Action(ALT_SCREEN, on))
+                    elif raw == "25":
+                        flush(); out.append(Action(CURSOR_VISIBLE, on))
             return
         if final == "m":
             # Emit what came before under the OLD style; anything after this
@@ -241,8 +282,21 @@ class AnsiParser:
             flush(); out.append(Action(ERASE_DISPLAY, params or "0")); return
         if final == "K":
             flush(); out.append(Action(ERASE_LINE, params or "0")); return
-        # Cursor movement, scrolling regions, device reports: a scrollback
-        # view has no cursor to move, so they are ignored rather than printed.
+
+        simple = {
+            "H": CURSOR_POS, "f": CURSOR_POS, "A": CURSOR_UP, "B": CURSOR_DOWN,
+            "C": CURSOR_FORWARD, "D": CURSOR_BACK, "G": CURSOR_COLUMN,
+            "`": CURSOR_COLUMN, "L": INSERT_LINES, "M": DELETE_LINES,
+            "@": INSERT_CHARS, "P": DELETE_CHARS, "X": ERASE_CHARS,
+            "S": SCROLL_UP, "T": SCROLL_DOWN, "r": SET_SCROLL_REGION,
+            "s": CURSOR_SAVE, "u": CURSOR_RESTORE,
+        }
+        kind = simple.get(final)
+        if kind is not None:
+            flush(); out.append(Action(kind, params)); return
+        if final == "d":                      # VPA -- absolute row
+            flush(); out.append(Action(CURSOR_POS, f"{params or '1'};")); return
+        # Device reports and anything else: ignored rather than printed.
 
     def _osc(self, body: str, out: List[object], flush) -> None:
         code, _, text = body.partition(";")

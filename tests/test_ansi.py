@@ -168,8 +168,12 @@ def test_unknown_sequences_are_swallowed():
     assert text_of(AnsiParser().feed("\x1b(Bvisible")) == "visible"
 
 
-def test_newlines_and_tabs_survive():
-    assert text_of(AnsiParser().feed("a\tb\nc")) == "a\tb\nc"
+def test_newlines_survive_and_tab_becomes_an_action():
+    """A screen buffer must place tabs on real tab stops, so TAB is an action
+    rather than a literal character."""
+    out = AnsiParser().feed("a\tb\nc")
+    assert text_of(out) == "ab\nc"
+    assert any(a.kind == ansi.TAB for a in actions(out))
 
 
 def test_nul_padding_is_dropped():
