@@ -28,6 +28,7 @@ from .ansi import DEFAULT_BG, DEFAULT_FG, Style
 from .screen import Screen
 
 DEFAULT_FONT = ("DejaVu Sans Mono", 11)
+CURSOR_TAG = "term_cursor"
 REDRAW_MS = 16                     # ~60fps ceiling on repaints
 
 
@@ -167,6 +168,7 @@ class TerminalView(tk.Frame):
                         widget.insert("end", chunk)
                     start = end
                 widget.insert("end", "\n")
+            self._draw_cursor(widget)
             widget.configure(state="disabled")
             if at_bottom:
                 widget.see("end")
@@ -215,6 +217,39 @@ class TerminalView(tk.Frame):
         return ""
 
     # -- clipboard ---------------------------------------------------------- #
+    def _draw_cursor(self, widget) -> None:
+        """Mark where the shell's cursor is, as a reverse-video block.
+
+        The Text widget's own insertion caret is useless here: the widget is
+        read-only and its caret has no relationship to the remote cursor. So
+        walking back through a command line to edit it gave no indication of
+        where you were. This paints the cell the shell says it is on.
+        """
+        try:
+            widget.tag_remove(CURSOR_TAG, "1.0", "end")
+        except tk.TclError:
+            return
+        screen = self.screen
+        if not screen.cursor_visible:
+            return
+        # Scrollback is rendered above the grid, so the cursor's screen row is
+        # offset by however many lines of history precede it.
+        line = len(screen.scrollback) + screen.row + 1
+        col = min(screen.col, max(0, screen.cols - 1))
+        start = f"{line}.{col}"
+        try:
+            if not widget.tag_ranges(CURSOR_TAG):
+                fg, bg = self.screen.style.resolved()
+                widget.tag_configure(CURSOR_TAG, background=DEFAULT_FG,
+                                     foreground=DEFAULT_BG)
+            widget.tag_add(CURSOR_TAG, start, f"{line}.{col + 1}")
+            widget.tag_raise(CURSOR_TAG)
+            # Keep sel above the cursor: a highlight the user made should not
+            # be interrupted by a block they did not.
+            widget.tag_raise("sel")
+        except tk.TclError:
+            pass
+
     def _redraw_if_free(self) -> None:
         """Repaint once the user has let go of their selection."""
         if self.has_selection():
