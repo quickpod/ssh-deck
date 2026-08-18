@@ -43,11 +43,11 @@ def scrt_tree(tmp_path):
     cfg = tmp_path / "Config"
     sess = cfg / "Sessions"
     sess.mkdir(parents=True)
-    (sess / "gpu6.ini").write_text(SSH_INI, encoding="utf-8")
+    (sess / "example.ini").write_text(SSH_INI, encoding="utf-8")
     (sess / "withpw.ini").write_text(PW_INI, encoding="utf-8")
     (sess / "Default_LocalShell.ini").write_text(LOCAL_INI, encoding="utf-8")
     (sess / "__FolderData__.ini").write_text(
-        'S:"Session List"=withpw:gpu6:\n', encoding="utf-8")
+        'S:"Session List"=withpw:example:\n', encoding="utf-8")
     return str(cfg)
 
 
@@ -74,7 +74,7 @@ def test_parse_ini_tolerates_a_bom():
 # Field mapping
 # --------------------------------------------------------------------------- #
 def test_port_is_read_as_hex(scrt_tree):
-    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "gpu6.ini"))
+    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "example.ini"))
     assert item.session.port == 0x16 == 22
 
 
@@ -84,7 +84,7 @@ def test_missing_port_falls_back_to_22(scrt_tree):
 
 
 def test_publickey_maps_to_key_auth(scrt_tree):
-    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "gpu6.ini"))
+    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "example.ini"))
     assert item.session.auth == "key"
     assert item.had_password is False
 
@@ -105,7 +105,7 @@ def test_the_encrypted_password_is_never_carried_across(scrt_tree):
 
 
 def test_firewall_none_is_not_treated_as_a_jump_host(scrt_tree):
-    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "gpu6.ini"))
+    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "example.ini"))
     assert item.session.jump is None
 
 
@@ -120,7 +120,7 @@ def test_hostless_local_shell_sessions_are_skipped(scrt_tree):
 # --------------------------------------------------------------------------- #
 def test_discover_finds_real_sessions_and_skips_builtins(scrt_tree):
     names = [i.session.name for i in scrt.discover(scrt_tree)]
-    assert names == ["withpw", "gpu6"]      # __FolderData__ order, defaults out
+    assert names == ["withpw", "example"]      # __FolderData__ order, defaults out
 
 
 def test_discover_uses_subdirectories_as_folders(scrt_tree, tmp_path):
@@ -134,7 +134,7 @@ def test_discover_uses_subdirectories_as_folders(scrt_tree, tmp_path):
 def test_one_bad_file_does_not_sink_the_whole_import(scrt_tree, tmp_path):
     bad = tmp_path / "Config" / "Sessions" / "broken.ini"
     bad.write_text('S:"Hostname"=\nS:"Username"=x\n', encoding="utf-8")
-    assert [i.session.name for i in scrt.discover(scrt_tree)] == ["withpw", "gpu6"]
+    assert [i.session.name for i in scrt.discover(scrt_tree)] == ["withpw", "example"]
 
 
 def test_missing_config_dir_explains_where_to_look(tmp_path):
@@ -184,7 +184,7 @@ def test_global_identity_key_is_none_without_ssh2_ini(scrt_tree):
 
 def test_sessions_using_the_global_key_record_no_key_path(scrt_tree):
     """Empty key_path == inherit, so the global key stays a single setting."""
-    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "gpu6.ini"))
+    item = scrt.read_session_file(os.path.join(scrt_tree, "Sessions", "example.ini"))
     assert item.session.key_path is None
 
 

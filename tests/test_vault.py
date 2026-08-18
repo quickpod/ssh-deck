@@ -20,7 +20,7 @@ from sshdeck.vault import VaultError, WrongPassphrase
 pytestmark = pytest.mark.skipif(not vault.crypto_available(),
                                 reason="cryptography not installed")
 
-SAMPLE = {"sessions": [{"name": "gpu6", "host": "192.0.2.10", "user": "root"}],
+SAMPLE = {"sessions": [{"name": "example", "host": "192.0.2.10", "user": "root"}],
           "credentials": [{"title": "fleet", "password": "hunter2"}]}
 PW = "correct horse battery staple"
 
@@ -43,7 +43,7 @@ def test_plaintext_never_appears_in_the_envelope():
     blob = json.dumps(vault.seal(SAMPLE, PW))
     assert "hunter2" not in blob
     assert "192.0.2.10" not in blob
-    assert "gpu6" not in blob
+    assert "example" not in blob
 
 
 def test_passphrase_is_not_stored_anywhere():
@@ -135,7 +135,7 @@ def test_write_is_atomic_and_leaves_no_temp_file(tmp_path):
 
 def test_plain_json_is_not_reported_as_a_vault(tmp_path):
     p = tmp_path / "sessions.json"
-    p.write_text('[{"name": "gpu6"}]', encoding="utf-8")
+    p.write_text('[{"name": "example"}]', encoding="utf-8")
     assert vault.is_vault_file(str(p)) is False
 
 
