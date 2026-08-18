@@ -129,7 +129,9 @@ def build_app():
     from tkinter import ttk, filedialog, messagebox, simpledialog
     import customtkinter as ctk
 
-    from . import aura, guiconfig
+    from . import aura
+    from . import navigator
+    from . import guiconfig
     from . import client as sshclient
     from . import forward as forwardmod
     from . import keys as keysmod
@@ -387,16 +389,14 @@ def build_app():
             left.pack(side="left", fill="y", padx=(0, 14))
             box = ctk.CTkFrame(left.body, fg_color="transparent")
             box.pack(fill="both", expand=True)
-            self._sess_list = tk.Listbox(box, height=16, width=26,
-                                         activestyle="none", exportselection=False,
-                                         font=aura.font(role="body"))
-            sb = ttk.Scrollbar(box, orient="vertical",
-                               command=self._sess_list.yview)
-            self._sess_list.configure(yscrollcommand=sb.set)
-            sb.pack(side="right", fill="y")
-            self._sess_list.pack(side="left", fill="both", expand=True)
-            aura.track(self._sess_list, "listbox")
-            self._sess_list.bind("<<ListboxSelect>>", lambda e: self._load_selected())
+            # The navigator tree (sshdeck.navigator) replaces the flat listbox:
+            # folders, a filter box, double-click to connect. Same data, same
+            # callbacks — the rest of this window does not know the difference.
+            self._sess_tree = navigator.SessionTree(
+                box,
+                on_select=lambda _name: self._load_selected(),
+                on_connect=lambda _name: self._connect())
+            self._sess_tree.pack(fill="both", expand=True)
             btns = ctk.CTkFrame(left.body, fg_color="transparent")
             btns.pack(fill="x", pady=(10, 0))
             aura.AuraButton(btns, "New", kind="secondary",
@@ -482,18 +482,13 @@ def build_app():
             except SSHDeckError as exc:
                 self._sessions_cache = []
                 self._show_error(str(exc))
-            self._sess_list.delete(0, "end")
-            for s in self._sessions_cache:
-                self._sess_list.insert("end", f"{s.name}  ({s.target()})")
+            self._sess_tree.set_sessions(self._sessions_cache)
 
         def _selected_session(self):
-            sel = self._sess_list.curselection()
-            if not sel:
+            name = self._sess_tree.selected_name()
+            if not name:
                 return None
-            idx = sel[0]
-            if 0 <= idx < len(self._sessions_cache):
-                return self._sessions_cache[idx]
-            return None
+            return next((s for s in self._sessions_cache if s.name == name), None)
 
         def _load_selected(self):
             s = self._selected_session()
