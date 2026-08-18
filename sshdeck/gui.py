@@ -929,19 +929,24 @@ def build_app():
                 left,
                 on_connect=self._nav_connect,
                 on_select=self._nav_select)
-            self._nav_tree.pack(fill="both", expand=True, padx=4, pady=(0, 6))
 
+            # Bottom-anchored controls are packed BEFORE the tree. The tree
+            # expands to fill what is left, and with pack() a widget added
+            # after an expanding sibling can be squeezed out entirely -- which
+            # is what hid the Add-session button.
+            aura.AuraButton(left, "＋  Add session", kind="secondary",
+                            command=self._nav_new).pack(
+                side="bottom", fill="x", padx=6, pady=(0, 8))
             navbtns = ctk.CTkFrame(left, fg_color="transparent")
-            navbtns.pack(fill="x", padx=6, pady=(0, 8))
+            navbtns.pack(side="bottom", fill="x", padx=6, pady=(0, 4))
             aura.AuraButton(navbtns, "Connect", kind="primary",
                             command=lambda: self._nav_connect(
                                 self._nav_tree.selected_name())).pack(
                 side="left", padx=(0, 6))
             aura.AuraButton(navbtns, "Edit", kind="secondary",
-                            command=self._nav_edit).pack(side="left",
-                                                         padx=(0, 6))
-            aura.AuraButton(navbtns, "New", kind="secondary",
-                            command=self._nav_new).pack(side="left")
+                            command=self._nav_edit).pack(side="left")
+
+            self._nav_tree.pack(fill="both", expand=True, padx=4, pady=(0, 6))
 
             # -- right: tabs over the stacked terminals
             right = ctk.CTkFrame(split, fg_color="transparent")
