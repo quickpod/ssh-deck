@@ -178,8 +178,54 @@ def build_app():
                 self.add_section(sid, label, glyph,
                                  getattr(self, "_build_" + sid))
             self.show("navigator")
+            self._install_sidebar_toggle()
+            # Start collapsed: the navigator is the point of the window and
+            # the section list is a place you visit, not somewhere you live.
+            self.after(60, lambda: self._set_sidebar(False))
             self.set_status("Ready")
             self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # ---- collapsible sidebar
+        def _install_sidebar_toggle(self):
+            """Add a ⯈/⯇ button that folds the section sidebar away.
+
+            Implemented here rather than in aura.py because the design system
+            is vendored and re-vendored; a change there would be lost.
+            """
+            self._sidebar_open = True
+            try:
+                self._sidebar_full_w = int(self.sidebar.cget("width")) or 248
+            except Exception:
+                self._sidebar_full_w = 248
+            self._sidebar_btn = aura.AuraButton(
+                self.header_actions, "⯇", kind="secondary", width=34,
+                command=self._toggle_sidebar)
+            self._sidebar_btn.pack(side="right", padx=(0, 8))
+
+        def _toggle_sidebar(self):
+            self._set_sidebar(not getattr(self, "_sidebar_open", True))
+
+        def _set_sidebar(self, opened):
+            """Show or collapse the sidebar, giving the width to the content."""
+            self._sidebar_open = bool(opened)
+            try:
+                if opened:
+                    self.sidebar.configure(width=self._sidebar_full_w)
+                    self.sidebar.grid()
+                    self._sidebar_btn.configure(text="⯇")
+                else:
+                    # grid_remove keeps the row/column config, so restoring is
+                    # a single call and nothing else has to be re-laid out.
+                    self.sidebar.grid_remove()
+                    self._sidebar_btn.configure(text="⯈")
+            except Exception:
+                pass
+            # The terminal grid depends on available width, so refit it.
+            for entry in getattr(self, "_terms", {}).values():
+                try:
+                    self.after(180, entry["view"].fit)
+                except Exception:
+                    pass
 
         # ---- assets / icon (window/taskbar icon; sidebar icon is AuraApp's)
         def _set_icon(self):
@@ -246,11 +292,15 @@ def build_app():
             self.connect(session)
 
         # ---- background operation runner
-        def _bg(self, work, on_ok, button=None, busy="Working…"):
+        def _bg(self, work, on_ok, button=None, busy="Working…",
+                on_error=None):
             """Run ``work()`` off the UI thread; call ``on_ok(result)`` back on it.
 
             Errors are shown inline (SSHDeckError message, or a generic note),
             never as a traceback.  Refuses a second op while one is in flight.
+            ``on_error`` lets a caller clean up after a failure -- the
+            navigator uses it to mark the tab it already opened as failed
+            rather than leaving it stuck on "connecting".
             """
             if self._busy:
                 self._show_error("Please wait — an operation is already running.")
@@ -281,6 +331,11 @@ def build_app():
                         pass
                 if err is not None:
                     self._show_error(err)
+                    if on_error is not None:
+                        try:
+                            on_error()
+                        except Exception:
+                            pass
                     return
                 try:
                     on_ok(res)
@@ -312,20 +367,21 @@ def build_app():
         def _prompt_secret(self, prompt, title="SSHDeck"):
             return simpledialog.askstring(title, prompt, show="*", parent=self)
 
-        def connect(self, session, then=None):
-            if session is None:
-                self._show_error("Choose a session first.")
-                return
-            if self._client is not None:
-                self.disconnect()
-            password = None
-            passphrase = None
+        def _prompt_credentials(self, session):
+            """Ask for whatever *session* needs, or None if the user cancels.
+
+            Returns ``(password, passphrase)``; either may be None when that
+            kind of secret is not required. Nothing is stored -- this runs
+            per connection, which is why opening a second tab on a
+            password session asks again.
+            """
+            password = passphrase = None
             if session.auth == "password":
                 password = self._prompt_secret(
                     f"Password for {session.target()}:")
                 if password is None:
                     self._set_status("Ready")
-                    return
+                    return None
             if session.auth == "key" and session.key_path:
                 # Try without a passphrase first; prompt only if the key needs one.
                 try:
@@ -336,7 +392,19 @@ def build_app():
                             f"Passphrase for {session.key_path}:")
                         if passphrase is None:
                             self._set_status("Ready")
-                            return
+                            return None
+            return password, passphrase
+
+        def connect(self, session, then=None):
+            if session is None:
+                self._show_error("Choose a session first.")
+                return
+            if self._client is not None:
+                self.disconnect()
+            creds = self._prompt_credentials(session)
+            if creds is None:
+                return
+            password, passphrase = creds
 
             def work():
                 return sshclient.connect(session, password=password,
@@ -580,6 +648,11 @@ def build_app():
                     pass
             entry = self._terms.get(tab_id)
             if entry:
+                # The other sections (SFTP, forwards, keys) act on "the"
+                # connection, so the active tab defines which one that is.
+                self._client = entry.get("client")
+                self._session = entry.get("session")
+                self._update_conn_label()
                 title = self._tabs.label_of(tab_id) or ""
                 try:
                     self.title(f"{title} — {APP_NAME}" if title else APP_NAME)
@@ -596,6 +669,17 @@ def build_app():
                     entry["chan"].close()
                 except Exception:
                     pass
+                # Each tab owns its connection, so closing the tab closes it.
+                client = entry.get("client")
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    if self._client is client:
+                        self._client = None
+                        self._session = None
+                        self._update_conn_label()
                 try:
                     entry["view"].destroy()
                 except tk.TclError:
@@ -630,7 +714,8 @@ def build_app():
                 self._term_area,
                 on_input=lambda data, c=chan: self._send(c, data),
                 on_title=lambda t, i=tab_id: self._tab_title(i, t),
-                on_activity=lambda i=tab_id: self._tabs.mark_activity(i))
+                on_activity=lambda i=tab_id: self._tabs.mark_activity(i),
+                on_resize=lambda r, c, ch=chan: self._resize_pty(ch, r, c))
             stop = threading.Event()
             self._terms[tab_id] = {"view": view, "chan": chan, "stop": stop}
             self._tabs.set_state(tab_id, navigator.CONNECTED)
@@ -663,6 +748,13 @@ def build_app():
             entry = self._terms.get(tab_id)
             if entry:
                 entry["view"].feed(text)
+
+        def _resize_pty(self, chan, rows, cols):
+            """Tell the remote its terminal changed size."""
+            try:
+                chan.resize_pty(width=cols, height=rows)
+            except Exception:
+                pass
 
         def _send(self, chan, data):
             try:
@@ -751,7 +843,13 @@ def build_app():
             self.set_status(f"{name} selected — double-click to connect")
 
         def _nav_connect(self, name):
-            """Connect (if needed) and open a terminal tab for *name*."""
+            """Open *name* in its own tab, with its own connection.
+
+            Every tab owns a separate client. Reusing whatever connection
+            happened to be open meant double-clicking a second host silently
+            opened another shell on the *first* one -- the session you asked
+            for was ignored.
+            """
             if not name:
                 return
             try:
@@ -759,12 +857,79 @@ def build_app():
             except SSHDeckError as exc:
                 self._show_error(str(exc))
                 return
-            if self._client is None:
-                self.connect(session, then=self._open_shell)
-            else:
-                # Already connected: a second tab on the same host is just
-                # another shell, no reconnection needed.
-                self._open_shell()
+            creds = self._prompt_credentials(session)
+            if creds is None:
+                return
+            password, passphrase = creds
+
+            self._term_seq += 1
+            tab_id = f"term{self._term_seq}"
+            self._tabs.add(tab_id, session.name, state=navigator.CONNECTING)
+            self._tabs.select(tab_id)
+
+            def work():
+                return sshclient.connect(session, password=password,
+                                         passphrase=passphrase)
+
+            def ok(conn):
+                self._attach_terminal(tab_id, conn, session)
+
+            def failed():
+                self._tabs.set_state(tab_id, navigator.FAILED)
+
+            self._bg(work, ok, busy=f"Connecting to {session.host}…",
+                     on_error=failed)
+
+        def _attach_terminal(self, tab_id, conn, session):
+            """Open a shell on *conn* and bind it to an existing tab."""
+            try:
+                chan = sshclient.open_shell(conn)
+            except SSHDeckError as exc:
+                self._tabs.set_state(tab_id, navigator.FAILED)
+                self._show_error(str(exc))
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return
+
+            view = termview.TerminalView(
+                self._term_area,
+                on_input=lambda data, c=chan: self._send(c, data),
+                on_title=lambda t, i=tab_id: self._tab_title(i, t),
+                on_activity=lambda i=tab_id: self._tabs.mark_activity(i),
+                on_resize=lambda r, c, ch=chan: self._resize_pty(ch, r, c))
+            stop = threading.Event()
+            self._terms[tab_id] = {"view": view, "chan": chan, "stop": stop,
+                                   "client": conn, "session": session}
+            self._tabs.set_state(tab_id, navigator.CONNECTED)
+            self._tabs.select(tab_id)
+            self._start_reader(tab_id, chan, stop)
+            guiconfig.add_recent(session.name)
+            self.report_success(f"Connected to {session.target()}.")
+
+        def _start_reader(self, tab_id, chan, stop):
+            def reader():
+                import time
+                while not stop.is_set():
+                    try:
+                        if chan.recv_ready():
+                            data = chan.recv(65536)
+                            if not data:
+                                break
+                            text = data.decode("utf-8", "replace")
+                            # paramiko's thread must never touch Tk: hand the
+                            # chunk over and parse on the UI thread.
+                            self.after(0, lambda t=text, i=tab_id: self._feed(i, t))
+                        else:
+                            time.sleep(0.02)
+                        if chan.exit_status_ready() and not chan.recv_ready():
+                            break
+                    except Exception:
+                        break
+                self.after(0, lambda i=tab_id: self._tab_ended(i))
+
+            threading.Thread(target=reader, daemon=True).start()
 
         # ---------- SFTP ----------
         def _build_sftp(self, frame):

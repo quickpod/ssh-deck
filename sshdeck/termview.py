@@ -21,6 +21,7 @@ What it does beyond drawing characters:
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 from typing import Callable, Optional
 
 from .ansi import DEFAULT_BG, DEFAULT_FG, Style
@@ -37,12 +38,17 @@ class TerminalView(tk.Frame):
                  font=DEFAULT_FONT,
                  on_input: Optional[Callable[[str], None]] = None,
                  on_title: Optional[Callable[[str], None]] = None,
-                 on_activity: Optional[Callable[[], None]] = None, **kw):
+                 on_activity: Optional[Callable[[], None]] = None,
+                 on_resize: Optional[Callable[[int, int], None]] = None, **kw):
         super().__init__(master, **kw)
         self.screen = Screen(rows=rows, cols=cols)
         self._on_input = on_input
         self._on_title = on_title
         self._on_activity = on_activity
+        self._on_resize = on_resize
+        self._fit_job = None
+        self._last_grid = (rows, cols)
+        self._redraw_pending = False   # output arrived while text was selected
         self._tags: set = set()
         self._redraw_job = None
         self._last_title = ""
@@ -65,6 +71,10 @@ class TerminalView(tk.Frame):
         self.text.bind("<Button-3>", self._paste)
         self.text.bind("<Button-2>", self._paste)
         self.text.bind("<Button-1>", lambda e: self.text.focus_set(), add="+")
+        # Without this the grid stays at its initial 80x24 no matter how big
+        # the window gets, so a maximised window shows a narrow column of text
+        # and full-screen programs wrap in the wrong place.
+        self.text.bind("<Configure>", self._on_configure)
 
     # -- output ------------------------------------------------------------ #
     def feed(self, data: str) -> None:
@@ -108,9 +118,27 @@ class TerminalView(tk.Frame):
             self._tags.add(name)
         return name
 
+    def has_selection(self) -> bool:
+        try:
+            return bool(self.text.tag_ranges("sel"))
+        except tk.TclError:
+            return False
+
     def _redraw(self) -> None:
         self._redraw_job = None
         widget = self.text
+        # Repainting rebuilds the whole buffer, which would drop the user's
+        # selection mid-drag and make copy-on-select unusable on a chatty
+        # terminal. Hold the repaint until the selection is released; the
+        # screen buffer keeps accumulating either way, so nothing is lost.
+        if self.has_selection():
+            self._redraw_pending = True
+            try:
+                self.after(250, self._redraw_if_free)
+            except tk.TclError:
+                pass
+            return
+        self._redraw_pending = False
         try:
             at_bottom = widget.yview()[1] >= 0.999
             widget.configure(state="normal")
@@ -178,6 +206,17 @@ class TerminalView(tk.Frame):
         return ""
 
     # -- clipboard ---------------------------------------------------------- #
+    def _redraw_if_free(self) -> None:
+        """Repaint once the user has let go of their selection."""
+        if self.has_selection():
+            try:
+                self.after(250, self._redraw_if_free)
+            except tk.TclError:
+                pass
+            return
+        if self._redraw_pending:
+            self._redraw()
+
     def _copy_selection(self, _event=None) -> None:
         """Copy on select -- no Ctrl+C, which the shell needs for SIGINT."""
         try:
@@ -207,17 +246,51 @@ class TerminalView(tk.Frame):
         return "break"
 
     # -- geometry ----------------------------------------------------------- #
-    def fit(self) -> None:
-        """Resize the buffer to the visible character grid."""
+    def _on_configure(self, _event=None) -> None:
+        """Refit after a resize, coalesced.
+
+        A drag fires <Configure> continuously; refitting on each one would
+        rebuild the grid dozens of times a second and renegotiate the remote
+        pty just as often.
+        """
+        if self._fit_job is not None:
+            try:
+                self.after_cancel(self._fit_job)
+            except Exception:
+                pass
         try:
-            font = self.text.cget("font")
-            fnt = tk.font.Font(font=font) if hasattr(tk, "font") else None
-            if fnt is None:
+            self._fit_job = self.after(120, self.fit)
+        except Exception:
+            self._fit_job = None
+
+    def grid_size(self):
+        """The character grid the widget can currently show, as (rows, cols)."""
+        fnt = tkfont.Font(font=self.text.cget("font"))
+        cw = max(1, fnt.measure("M"))
+        ch = max(1, fnt.metrics("linespace"))
+        width = self.text.winfo_width()
+        height = self.text.winfo_height()
+        if width <= 1 or height <= 1:        # not laid out yet
+            return None
+        pad = 2 * 6
+        cols = max(20, (width - pad) // cw)
+        rows = max(5, (height - 2 * 4) // ch)
+        return rows, cols
+
+    def fit(self) -> None:
+        """Match the buffer, and the remote pty, to the visible area."""
+        self._fit_job = None
+        try:
+            size = self.grid_size()
+            if size is None or size == self._last_grid:
                 return
-            cw = max(1, fnt.measure("M"))
-            ch = max(1, fnt.metrics("linespace"))
-            cols = max(20, (self.text.winfo_width() - 12) // cw)
-            rows = max(5, (self.text.winfo_height() - 8) // ch)
+            rows, cols = size
+            self._last_grid = size
             self.screen.resize(rows, cols)
+            if self._on_resize is not None:
+                # The remote needs telling too, or it keeps formatting for the
+                # old width and `top`/`vi` draw to the wrong edge.
+                self._on_resize(rows, cols)
+            self._schedule_redraw()
         except Exception:
             pass
