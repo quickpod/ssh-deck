@@ -116,6 +116,15 @@ class TerminalView(tk.Frame):
                 cfg["overstrike"] = True
             self.text.tag_configure(name, **cfg)
             self._tags.add(name)
+            # Tk gives a newly created tag higher priority than existing ones,
+            # and every cell carries a colour tag with a background -- so
+            # without this the ANSI tags paint over the selection and a drag
+            # highlights nothing visible, even though the text really is
+            # selected and does reach the clipboard.
+            try:
+                self.text.tag_raise("sel")
+            except tk.TclError:
+                pass
         return name
 
     def has_selection(self) -> bool:
