@@ -197,10 +197,19 @@ def build_app():
                 self._sidebar_full_w = int(self.sidebar.cget("width")) or 248
             except Exception:
                 self._sidebar_full_w = 248
+            # The toggle belongs beside the thing it collapses, so it goes at
+            # the left edge of the header rather than into header_actions,
+            # where it landed between the menu button and the status text.
+            header = self._title_label.master
+            header.grid_columnconfigure(0, weight=0)
+            header.grid_columnconfigure(1, weight=1)
             self._sidebar_btn = aura.AuraButton(
-                self.header_actions, "⯇", kind="secondary", width=34,
+                header, "⯇", kind="secondary", width=34,
                 command=self._toggle_sidebar)
-            self._sidebar_btn.pack(side="right", padx=(0, 8))
+            self._sidebar_btn.grid(row=0, column=0, sticky="w",
+                                   padx=(14, 0), pady=(14, 12))
+            self._title_label.grid_configure(column=1, padx=(10, 0))
+            self.header_actions.grid_configure(column=2)
 
         def _toggle_sidebar(self):
             self._set_sidebar(not getattr(self, "_sidebar_open", True))
@@ -814,8 +823,7 @@ def build_app():
                                 self._nav_tree.selected_name())).pack(
                 side="left", padx=(0, 6))
             aura.AuraButton(navbtns, "Edit", kind="secondary",
-                            command=lambda: self.show("sessions")).pack(
-                side="left")
+                            command=self._nav_edit).pack(side="left")
 
             # -- right: tabs over the stacked terminals
             right = ctk.CTkFrame(split, fg_color="transparent")
@@ -837,6 +845,41 @@ def build_app():
                 self._nav_tree.set_sessions(sessionsmod.load_all())
             except Exception:
                 pass
+
+        def _nav_edit(self):
+            """Open the Sessions editor on whatever the navigator has selected.
+
+            Switching section alone left the editor showing whichever session
+            the other tree happened to be on, so Edit appeared to open the
+            wrong one. The selection has to be carried across explicitly --
+            the two trees are separate widgets with separate state.
+            """
+            name = self._nav_tree.selected_name()
+            if not name:
+                self._show_error("Select a session first.")
+                return
+            self.show("sessions")
+            try:
+                self._sess_tree.set_sessions(sessionsmod.load_all())
+                self._sess_tree.tree.selection_set(name)
+                self._sess_tree.tree.see(name)
+            except Exception:
+                pass
+            try:
+                session = sessionsmod.get(name)
+            except SSHDeckError as exc:
+                self._show_error(str(exc))
+                return
+            # Populate the form directly: relying on the tree's selection
+            # event is racy right after a section switch.
+            self._sf["name"].set(session.name)
+            self._sf["host"].set(session.host)
+            self._sf["port"].set(str(session.port))
+            self._sf["user"].set(session.user or "")
+            self._sf["auth"].set(session.auth)
+            self._sf["key_path"].set(session.key_path or "")
+            self._sf["jump"].set(session.jump or "")
+            self.set_status(f"Editing {session.name}")
 
         def _nav_select(self, name):
             """Selecting only previews; connecting is a deliberate act."""
