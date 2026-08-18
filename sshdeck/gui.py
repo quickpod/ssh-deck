@@ -131,6 +131,7 @@ def build_app():
 
     from . import aura
     from . import navigator
+    from . import termview
     from . import guiconfig
     from . import client as sshclient
     from . import forward as forwardmod
@@ -158,8 +159,8 @@ def build_app():
             # connection state
             self._client = None          # live paramiko client, or None
             self._session = None         # the connected Session
-            self._chan = None            # interactive shell channel
-            self._chan_stop = None       # threading.Event for the read loop
+            self._terms = {}             # tab id -> live terminal + channel
+            self._term_seq = 0           # monotonic id for new tabs
             self._forwards = []          # [(spec, stopper)]
 
             self._set_icon()
@@ -350,7 +351,9 @@ def build_app():
             self._bg(work, ok, busy=f"Connecting to {session.host}…")
 
         def disconnect(self):
-            self._stop_shell()
+            # Every tab rides the same client, so dropping it ends them all --
+            # closing only the active one would leave dead tabs on screen.
+            self._close_all_tabs()
             for _spec, stopper in self._forwards:
                 try:
                     stopper()
@@ -561,96 +564,147 @@ def build_app():
             self._term_btn = aura.AuraButton(top, "Open shell", kind="primary",
                                              command=self._open_shell)
             self._term_btn.pack(side="left")
-            aura.AuraButton(top, "Close shell", kind="secondary",
+            aura.AuraButton(top, "Close tab", kind="secondary",
                             command=self._stop_shell).pack(side="left", padx=8)
-            aura.Caption(top,
-                         "Interactive shell over the current connection.").pack(
+            aura.Caption(top, "Each connection opens its own tab.").pack(
                 side="left", padx=(12, 0))
 
-            body = ctk.CTkFrame(frame, fg_color="transparent")
-            body.pack(fill="both", expand=True, pady=(12, 0))
-            self._term = tk.Text(body, wrap="char", height=22, font=MONO,
-                                 state="disabled", relief="flat",
-                                 padx=8, pady=6)
-            sb = ttk.Scrollbar(body, orient="vertical", command=self._term.yview)
-            self._term.configure(yscrollcommand=sb.set)
-            sb.pack(side="right", fill="y")
-            self._term.pack(side="left", fill="both", expand=True)
-            aura.track(self._term, "text")     # monospace output; theme-flips
-            self._term.bind("<Key>", self._term_key)
+            # Tabs across the top, terminals stacked beneath — the SecureCRT
+            # arrangement. Only the active tab's view is packed; the rest keep
+            # running and buffering in the background.
+            self._tabs = navigator.TabStrip(
+                frame, on_select=self._select_tab, on_close=self._close_tab)
+            self._tabs.pack(fill="x", pady=(12, 0))
+            self._term_area = ctk.CTkFrame(frame, fg_color="transparent")
+            self._term_area.pack(fill="both", expand=True, pady=(6, 0))
+            self._terms = {}          # tab id -> dict(view, chan, stop, session)
+            self._term_seq = 0
 
-        def _term_write(self, text):
-            self._term.configure(state="normal")
-            self._term.insert("end", text)
-            self._term.see("end")
-            self._term.configure(state="disabled")
+        # -- terminal tabs -------------------------------------------------- #
+        def _select_tab(self, tab_id):
+            """Show one terminal; the others stay live but unpacked."""
+            for tid, entry in self._terms.items():
+                try:
+                    if tid == tab_id:
+                        entry["view"].pack(fill="both", expand=True)
+                        entry["view"].text.focus_set()
+                    else:
+                        entry["view"].pack_forget()
+                except tk.TclError:
+                    pass
+            entry = self._terms.get(tab_id)
+            if entry:
+                title = self._tabs.label_of(tab_id) or ""
+                try:
+                    self.title(f"{title} — {APP_NAME}" if title else APP_NAME)
+                except tk.TclError:
+                    pass
+
+        def _close_tab(self, tab_id):
+            entry = self._terms.pop(tab_id, None)
+            if entry:
+                stop = entry.get("stop")
+                if stop is not None:
+                    stop.set()
+                try:
+                    entry["chan"].close()
+                except Exception:
+                    pass
+                try:
+                    entry["view"].destroy()
+                except tk.TclError:
+                    pass
+            self._tabs.remove(tab_id)
+            if self._tabs.active:
+                self._select_tab(self._tabs.active)
+
+        def _stop_shell(self):
+            if self._tabs.active:
+                self._close_tab(self._tabs.active)
+
+        def _close_all_tabs(self):
+            for tab_id in list(self._terms):
+                self._close_tab(tab_id)
 
         def _open_shell(self):
             if not self._require_connection():
                 return
-            if self._chan is not None:
-                self._show_error("A shell is already open.")
-                return
             try:
-                self._chan = sshclient.open_shell(self._client)
+                chan = sshclient.open_shell(self._client)
             except SSHDeckError as exc:
                 self._show_error(str(exc))
                 return
-            self._chan_stop = threading.Event()
-            self._term.configure(state="normal")
-            self._term.delete("1.0", "end")
-            self._term.configure(state="disabled")
+
+            self._term_seq += 1
+            tab_id = f"term{self._term_seq}"
+            label = self._session_label()
+            self._tabs.add(tab_id, label, state=navigator.CONNECTING)
+
+            view = termview.TerminalView(
+                self._term_area,
+                on_input=lambda data, c=chan: self._send(c, data),
+                on_title=lambda t, i=tab_id: self._tab_title(i, t),
+                on_activity=lambda i=tab_id: self._tabs.mark_activity(i))
+            stop = threading.Event()
+            self._terms[tab_id] = {"view": view, "chan": chan, "stop": stop}
+            self._tabs.set_state(tab_id, navigator.CONNECTED)
+            self._tabs.select(tab_id)
 
             def reader():
                 import time
-                while not self._chan_stop.is_set():
+                while not stop.is_set():
                     try:
-                        if self._chan.recv_ready():
-                            data = self._chan.recv(4096)
+                        if chan.recv_ready():
+                            data = chan.recv(65536)
                             if not data:
                                 break
                             text = data.decode("utf-8", "replace")
-                            self.after(0, lambda t=text: self._term_write(t))
+                            # paramiko's thread must never touch Tk: hand the
+                            # chunk to the UI thread and let it parse there.
+                            self.after(0, lambda t=text, i=tab_id: self._feed(i, t))
                         else:
-                            time.sleep(0.03)
-                        if self._chan.exit_status_ready() and not self._chan.recv_ready():
+                            time.sleep(0.02)
+                        if chan.exit_status_ready() and not chan.recv_ready():
                             break
                     except Exception:
                         break
-                self.after(0, lambda: self._set_status("shell closed"))
+                self.after(0, lambda i=tab_id: self._tab_ended(i))
 
             threading.Thread(target=reader, daemon=True).start()
-            self.report_success("Shell open — type below.")
-            self._term.focus_set()
+            self.report_success("Shell open.")
 
-        def _term_key(self, event):
-            if self._chan is None:
-                return "break"
-            ch = event.char
-            keysym = event.keysym
+        def _feed(self, tab_id, text):
+            entry = self._terms.get(tab_id)
+            if entry:
+                entry["view"].feed(text)
+
+        def _send(self, chan, data):
             try:
-                if keysym == "Return":
-                    self._chan.send("\n")
-                elif keysym == "BackSpace":
-                    self._chan.send("\x7f")
-                elif keysym == "Tab":
-                    self._chan.send("\t")
-                elif ch and ch.isprintable():
-                    self._chan.send(ch)
+                chan.send(data)
             except Exception:
                 pass
-            return "break"
 
-        def _stop_shell(self):
-            if self._chan_stop is not None:
-                self._chan_stop.set()
-            if self._chan is not None:
-                try:
-                    self._chan.close()
-                except Exception:
-                    pass
-            self._chan = None
-            self._chan_stop = None
+        def _tab_title(self, tab_id, title):
+            """Live tab label from the shell's own OSC title sequence."""
+            if title:
+                self._tabs.set_label(tab_id, title)
+                if self._tabs.active == tab_id:
+                    try:
+                        self.title(f"{title} — {APP_NAME}")
+                    except tk.TclError:
+                        pass
+
+        def _tab_ended(self, tab_id):
+            if tab_id in self._terms:
+                self._tabs.set_state(tab_id, navigator.DISCONNECTED)
+
+        def _session_label(self):
+            name = None
+            try:
+                name = self._sess_tree.selected_name()
+            except Exception:
+                pass
+            return name or "shell"
 
         # ---------- SFTP ----------
         def _build_sftp(self, frame):
