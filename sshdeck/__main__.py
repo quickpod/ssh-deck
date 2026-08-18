@@ -159,6 +159,67 @@ def cmd_forward(a):
     print(fwd.describe())
 
 
+def cmd_import_securecrt(a):
+    """Import saved sessions from a SecureCRT configuration (read-only)."""
+    from . import guiconfig, scrt
+
+    config_dir = a.source or scrt.default_config_dir()
+    found = scrt.discover(config_dir)
+    if not found:
+        print("No SecureCRT sessions found.")
+        return 0
+
+    # SecureCRT's global public key becomes SSHDeck's inherited identity, so
+    # the sessions that relied on it keep working untouched.
+    global_key = scrt.global_identity_key(config_dir) if config_dir else None
+    if global_key and not a.dry_run:
+        guiconfig.set_global_key(global_key)
+    if global_key:
+        import os as _os
+        state = "" if _os.path.isfile(global_key) else "  (file not found!)"
+        verb = "would set" if a.dry_run else "set"
+        print(f"  {verb:14} global identity key -> {global_key}{state}")
+
+    existing = {s.name for s in sessionsmod.load_all()}
+    added = skipped = 0
+    for item in found:
+        clash = item.session.name in existing
+        if clash and not a.force:
+            skipped += 1
+            mark = "skip (exists)"
+        elif a.dry_run:
+            mark = "would add" if not clash else "would replace"
+        else:
+            sessionsmod.upsert(item.session)
+            existing.add(item.session.name)
+            added += 1
+            mark = "added" if not clash else "replaced"
+        folder = f"[{item.folder}] " if item.folder else ""
+        pw = "  (needs password)" if item.needs_password else ""
+        print(f"  {mark:14} {folder}{item.session.name} -> "
+              f"{item.session.user or '?'}@{item.session.host}:"
+              f"{item.session.port}{pw}")
+
+    if global_key:
+        import os as _os
+        from . import identity as _identity
+        if _os.path.isfile(global_key) and _identity.is_encrypted(global_key):
+            print("\nThe global key is passphrase-protected. SSHDeck asks for "
+                  "it once per run and reuses it for every session; it is "
+                  "never written to disk.")
+
+    need = [i.session.name for i in found if i.needs_password]
+    print(f"\n{len(found)} found, {added} imported, {skipped} skipped.")
+    if a.dry_run:
+        print("Dry run — nothing was written. Re-run without --dry-run to import.")
+    if need:
+        print("\nSecureCRT stores passwords encrypted under its configuration "
+              "passphrase, so they could not be read. Re-enter one for:")
+        for name in need:
+            print(f"  - {name}")
+    return 0
+
+
 # --- parser -----------------------------------------------------------------
 def build_parser():
     p = argparse.ArgumentParser(
@@ -201,6 +262,17 @@ def build_parser():
     f.add_argument("op", choices=["ls", "get", "put", "mkdir", "rm"])
     f.add_argument("paths", nargs="*")
     f.set_defaults(func=cmd_sftp)
+
+    # import-securecrt
+    ic = sub.add_parser("import-securecrt",
+                        help="Import saved sessions from SecureCRT (read-only)")
+    ic.add_argument("--source", help="SecureCRT Config folder (autodetected "
+                                     "when omitted)")
+    ic.add_argument("--dry-run", action="store_true",
+                    help="show what would be imported, write nothing")
+    ic.add_argument("--force", action="store_true",
+                    help="replace sessions whose name already exists")
+    ic.set_defaults(func=cmd_import_securecrt)
 
     # keygen
     k = sub.add_parser("keygen", help="Generate an SSH key pair")

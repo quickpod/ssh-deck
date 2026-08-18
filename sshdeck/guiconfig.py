@@ -41,7 +41,7 @@ def config_path():
 
 
 def _defaults():
-    return {"theme": "light", "recent": []}
+    return {"theme": "light", "recent": [], "global_key": ""}
 
 
 def load():
@@ -57,6 +57,9 @@ def load():
             recent = data.get("recent")
             if isinstance(recent, list):
                 cfg["recent"] = [p for p in recent if isinstance(p, str)][:MAX_RECENT]
+            gk = data.get("global_key")
+            if isinstance(gk, str):
+                cfg["global_key"] = gk
     except Exception:
         pass  # missing/corrupt -> defaults; never fatal
     return cfg
@@ -69,6 +72,7 @@ def save(cfg):
         clean = {
             "theme": cfg.get("theme") if cfg.get("theme") in VALID_THEMES else "light",
             "recent": [p for p in cfg.get("recent", []) if isinstance(p, str)][:MAX_RECENT],
+            "global_key": cfg.get("global_key", "") if isinstance(cfg.get("global_key", ""), str) else "",
         }
         tmp = config_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -108,4 +112,19 @@ def add_recent(name):
 def clear_recent():
     cfg = load()
     cfg["recent"] = []
+    save(cfg)
+
+
+def get_global_key():
+    """Path of the identity key new sessions inherit ("" when unset).
+
+    A session's own ``key_path`` always takes precedence; this is the
+    fall-back, equivalent to SecureCRT's global public key.
+    """
+    return load().get("global_key", "")
+
+
+def set_global_key(path):
+    cfg = load()
+    cfg["global_key"] = str(path or "")
     save(cfg)
