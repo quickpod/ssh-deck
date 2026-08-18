@@ -39,14 +39,14 @@ def _parse_jump(spec, default_user=None):
     return (user or default_user), host, port
 
 
-def _open_jump_channel(session, password, passphrase, timeout):
+def _open_jump_channel(session, password, passphrase, timeout, pkey=None):
     """Connect to the jump host and return (jump_client, sock) to the target."""
     juser, jhost, jport = _parse_jump(session.jump, session.user)
     jump = paramiko.SSHClient()
     jump.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         jump.connect(hostname=jhost, port=jport, username=juser,
-                     password=password, passphrase=passphrase,
+                     password=password, passphrase=passphrase, pkey=pkey,
                      timeout=timeout, allow_agent=True, look_for_keys=True)
     except Exception as exc:
         _raise_connect_error(exc, f"{juser or ''}@{jhost}:{jport}", jump=True)
@@ -62,8 +62,14 @@ def _open_jump_channel(session, password, passphrase, timeout):
     return jump, sock
 
 
-def connect(session, password=None, passphrase=None, timeout=DEFAULT_TIMEOUT):
+def connect(session, password=None, passphrase=None, timeout=DEFAULT_TIMEOUT,
+            pkey=None):
     """Open and return a connected paramiko ``SSHClient`` for *session*.
+
+    ``pkey`` accepts an already-decrypted key. Callers that have unlocked the
+    key once (see :mod:`sshdeck.identity`) pass it here so the passphrase is
+    not needed again -- otherwise every new session would re-read the key from
+    disk and have to prompt for the same passphrase.
 
     The returned client carries a ``_sshdeck_jump`` attribute (the jump client,
     or ``None``) so :func:`close` can tear the whole chain down.
@@ -74,15 +80,14 @@ def connect(session, password=None, passphrase=None, timeout=DEFAULT_TIMEOUT):
         raise SSHDeckError(
             f"session {session.name!r} uses password auth -- a password is required")
 
-    pkey = None
-    if session.auth == "key" and session.key_path:
+    if pkey is None and session.auth == "key" and session.key_path:
         pkey = load_key(session.key_path, passphrase=passphrase)
 
     jump_client = None
     sock = None
     if session.jump:
         jump_client, sock = _open_jump_channel(session, password, passphrase,
-                                               timeout)
+                                               timeout, pkey=pkey)
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())

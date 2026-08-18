@@ -134,6 +134,7 @@ def build_app():
     from . import aura
     from . import navigator
     from . import termview
+    from . import identity
     from . import guiconfig
     from . import client as sshclient
     from . import forward as forwardmod
@@ -379,30 +380,44 @@ def build_app():
         def _prompt_credentials(self, session):
             """Ask for whatever *session* needs, or None if the user cancels.
 
-            Returns ``(password, passphrase)``; either may be None when that
-            kind of secret is not required. Nothing is stored -- this runs
-            per connection, which is why opening a second tab on a
-            password session asks again.
+            Returns ``(password, passphrase, pkey)``. A key passphrase is asked
+            for **once per run**: the decrypted key is held by
+            :mod:`sshdeck.identity` and handed to later connections, so opening
+            five sessions that share one key prompts once rather than five
+            times. Only the decrypted key lives in memory -- never the
+            passphrase -- and it is dropped when the app closes.
+
+            Passwords are deliberately not cached: they authenticate a single
+            session, and holding them would be storing a credential rather than
+            avoiding repeated work on one the user already unlocked.
             """
-            password = passphrase = None
+            password = passphrase = pkey = None
             if session.auth == "password":
                 password = self._prompt_secret(
                     f"Password for {session.target()}:")
                 if password is None:
                     self._set_status("Ready")
                     return None
-            if session.auth == "key" and session.key_path:
-                # Try without a passphrase first; prompt only if the key needs one.
+            key_path = identity.effective_key_path(session)
+            if session.auth == "key" and key_path:
                 try:
-                    keysmod.load_key(session.key_path)
-                except SSHDeckError as exc:
-                    if "passphrase" in str(exc).lower():
-                        passphrase = self._prompt_secret(
-                            f"Passphrase for {session.key_path}:")
-                        if passphrase is None:
-                            self._set_status("Ready")
-                            return None
-            return password, passphrase
+                    # Succeeds outright when the key needs no passphrase, or
+                    # when this run already unlocked it.
+                    pkey = identity.unlock(key_path)
+                except identity.PassphraseRequired:
+                    passphrase = self._prompt_secret(
+                        f"Passphrase for {os.path.basename(key_path)}:")
+                    if passphrase is None:
+                        self._set_status("Ready")
+                        return None
+                    try:
+                        pkey = identity.unlock(key_path, passphrase)
+                    except SSHDeckError as exc:
+                        self._show_error(str(exc))
+                        return None
+                except SSHDeckError:
+                    pkey = None      # unreadable/unsupported: let connect report
+            return password, passphrase, pkey
 
         def connect(self, session, then=None):
             if session is None:
@@ -413,11 +428,11 @@ def build_app():
             creds = self._prompt_credentials(session)
             if creds is None:
                 return
-            password, passphrase = creds
+            password, passphrase, pkey = creds
 
             def work():
                 return sshclient.connect(session, password=password,
-                                         passphrase=passphrase)
+                                         passphrase=passphrase, pkey=pkey)
 
             def ok(conn):
                 self._client = conn
@@ -828,9 +843,16 @@ def build_app():
             # -- right: tabs over the stacked terminals
             right = ctk.CTkFrame(split, fg_color="transparent")
             right.pack(side="left", fill="both", expand=True)
+            tabbar = ctk.CTkFrame(right, fg_color="transparent")
+            tabbar.pack(fill="x")
             self._tabs = navigator.TabStrip(
-                right, on_select=self._select_tab, on_close=self._close_tab)
-            self._tabs.pack(fill="x")
+                tabbar, on_select=self._select_tab, on_close=self._close_tab)
+            self._tabs.pack(side="left", fill="x", expand=True)
+            # No confirmation: closing terminals is not destructive, and a
+            # dialog every time would be worse than the occasional re-open.
+            aura.AuraButton(tabbar, "Close all", kind="secondary",
+                            command=self._close_all_tabs).pack(
+                side="right", padx=(8, 0))
             self._term_area = ctk.CTkFrame(right, fg_color="transparent")
             self._term_area.pack(fill="both", expand=True, pady=(6, 0))
 
@@ -903,7 +925,7 @@ def build_app():
             creds = self._prompt_credentials(session)
             if creds is None:
                 return
-            password, passphrase = creds
+            password, passphrase, pkey = creds
 
             self._term_seq += 1
             tab_id = f"term{self._term_seq}"
@@ -912,7 +934,7 @@ def build_app():
 
             def work():
                 return sshclient.connect(session, password=password,
-                                         passphrase=passphrase)
+                                         passphrase=passphrase, pkey=pkey)
 
             def ok(conn):
                 self._attach_terminal(tab_id, conn, session)
@@ -1416,6 +1438,12 @@ def build_app():
 
         # ---- shutdown
         def _on_close(self):
+            # Decrypted keys are held only for the life of the app; closing it
+            # drops them, so the next run asks again.
+            try:
+                identity.forget_all()
+            except Exception:
+                pass
             try:
                 self.disconnect()
             except Exception:
