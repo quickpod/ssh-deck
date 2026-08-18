@@ -3,3 +3,7 @@ paramiko>=3.0
 # Aura design system (vendored sshdeck/aura.py) — CustomTkinter theme layer.
 customtkinter>=5.2
 darkdetect>=0.8
+# Encrypted profile/credential vault (Apache-2.0 / BSD). Already an indirect
+# dependency via paramiko; declared explicitly because sshdeck.vault uses it
+# directly (Argon2id needs cryptography >= 44).
+cryptography>=44
